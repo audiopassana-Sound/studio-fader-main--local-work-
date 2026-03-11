@@ -263,7 +263,7 @@ const Admin = () => {
       const record = {
         title: form.title.trim(),
         client: form.client.trim() || null,
-        category: form.category,
+        category: form.category === "post" ? "post-production" : "recording",
         video_url: uploadedVideoUrl || form.video_url.trim() || null,
         description: form.description.trim() || null,
         stem_1_name: form.stem_1_name.trim() || null,
