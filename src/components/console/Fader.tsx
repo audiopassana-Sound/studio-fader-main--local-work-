@@ -12,6 +12,12 @@ const Fader = memo(({ value, onChange, motorized }: FaderProps) => {
   const thumbRef = useRef<HTMLDivElement>(null);
   const fillRef = useRef<HTMLDivElement>(null);
   const lastCommitted = useRef(value);
+  const lastForTrigger = useRef(value);
+
+  // Local threshold matching the -9.5 dB point used in Index.tsx.
+  // ChannelStrip maps 0–100 → dB via: dB = (value / 100) * 12 - 12,
+  // so -9.5 dB ≈ 20.8 on the 0–100 fader scale.
+  const FADER_PLAY_THRESHOLD = 20.8;
 
   // Sync DOM directly for motorized/external updates when not dragging
   useEffect(() => {
@@ -32,13 +38,29 @@ const Fader = memo(({ value, onChange, motorized }: FaderProps) => {
     }
   }, [value, motorized]);
 
-  const commitValue = useCallback((v: number) => {
-    const clamped = Math.max(0, Math.min(100, v));
-    if (Math.abs(clamped - lastCommitted.current) > 0.3) {
-      lastCommitted.current = clamped;
-      onChange(clamped);
-    }
-  }, [onChange]);
+  const commitValue = useCallback(
+    (v: number) => {
+      const clamped = Math.max(0, Math.min(100, v));
+
+      // Debug: surface actual fader values in the browser console
+      // so you can correlate to the dB markings.
+      // eslint-disable-next-line no-console
+      console.log("Fader value:", clamped);
+
+      // Detect upward crossing of the -9.5 dB (~20.8) threshold locally,
+      // and broadcast a global "force-play" custom event.
+      if (lastForTrigger.current < FADER_PLAY_THRESHOLD && clamped >= FADER_PLAY_THRESHOLD) {
+        window.dispatchEvent(new CustomEvent("force-play"));
+      }
+      lastForTrigger.current = clamped;
+
+      if (Math.abs(clamped - lastCommitted.current) > 0.3) {
+        lastCommitted.current = clamped;
+        onChange(clamped);
+      }
+    },
+    [onChange]
+  );
 
   const updateVisual = useCallback((clientY: number) => {
     if (!trackRef.current) return;

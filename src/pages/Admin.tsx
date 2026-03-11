@@ -59,6 +59,7 @@ const Admin = () => {
     stem_3: null,
     stem_4: null,
   });
+  const [videoFile, setVideoFile] = useState<File | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -84,13 +85,15 @@ const Admin = () => {
     if (session) fetchProjects();
   }, [session, fetchProjects]);
 
-  const uploadFile = async (file: File, folder: string): Promise<string | null> => {
+  const uploadFile = async (file: File, folder: string, bucket = "audio_files"): Promise<string | null> => {
     const ext = file.name.split(".").pop();
     const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
 
-    const contentType = file.type || "audio/mpeg";
+    const contentType =
+      file.type ||
+      (bucket === "audio_files" ? "video/mp4" : "audio/mpeg");
 
-    const { error } = await supabase.storage.from("audio_files").upload(path, file, {
+      const { error } = await supabase.storage.from(bucket).upload(path, file, {
       contentType,
       cacheControl: "3600",
       upsert: false,
@@ -102,7 +105,7 @@ const Admin = () => {
       return null;
     }
 
-    const { data } = supabase.storage.from("audio_files").getPublicUrl(path);
+    const { data } = supabase.storage.from(bucket).getPublicUrl(path)
     if (!data.publicUrl) {
       toast.error(`Failed to get public URL for ${file.name}`);
       return null;
@@ -114,6 +117,7 @@ const Admin = () => {
   const resetForm = () => {
     setForm(EMPTY_FORM);
     setAudioFiles({ audio_mix: null, stem_1: null, stem_2: null, stem_3: null, stem_4: null });
+    setVideoFile(null);
     setEditingId(null);
     setShowForm(false);
   };
@@ -131,6 +135,7 @@ const Admin = () => {
       stem_4_name: (p as any).stem_4_name || "",
     });
     setAudioFiles({ audio_mix: null, stem_1: null, stem_2: null, stem_3: null, stem_4: null });
+    setVideoFile(null);
     setEditingId(p.id);
     setShowForm(true);
   };
@@ -173,6 +178,37 @@ const Admin = () => {
     </div>
   );
 
+  const VideoFileInput = () => (
+    <div className="space-y-1">
+      <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Upload Video File</label>
+      <div className="flex items-center gap-2">
+        <label className="flex items-center gap-2 px-3 py-2 rounded-md border border-input bg-secondary/50 cursor-pointer hover:bg-secondary transition-colors text-sm">
+          <Upload className="w-4 h-4 text-muted-foreground" />
+          <span className="text-foreground/80">{videoFile?.name || "Choose file"}</span>
+          <input
+            type="file"
+            accept="video/*"
+            className="hidden"
+            onChange={(e) => setVideoFile(e.target.files?.[0] || null)}
+          />
+        </label>
+        {videoFile && (
+          <button
+            type="button"
+            onClick={() => setVideoFile(null)}
+            className="text-muted-foreground hover:text-destructive"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Uploading stores a public URL into <code className="text-foreground/80">video_url</code> (bucket:{" "}
+        <code className="text-foreground/80">video_files</code>).
+      </p>
+    </div>
+  );
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title.trim() || !form.category) {
@@ -202,7 +238,7 @@ const Admin = () => {
       for (const { key, urlKey } of uploadKeys) {
         const file = audioFiles[key];
         if (!file) continue;
-        const url = await uploadFile(file, key);
+        const url = await uploadFile(file, key, "audio_files");
         if (!url) {
           setSubmitting(false);
           return;
@@ -210,11 +246,25 @@ const Admin = () => {
         urls[urlKey] = url;
       }
 
+      // Video upload (bucket: video_files). If provided, overrides the Video URL field.
+      let uploadedVideoUrl: string | null = null;
+      if (videoFile) {
+        const url = await uploadFile(videoFile, "video", "audio_files");
+        if (!url) {
+          toast.error(
+            "Video upload failed. Make sure a Supabase Storage bucket named 'video_files' exists and is configured for uploads + public access."
+          );
+          setSubmitting(false);
+          return;
+        }
+        uploadedVideoUrl = url;
+      }
+
       const record = {
         title: form.title.trim(),
         client: form.client.trim() || null,
         category: form.category,
-        video_url: form.video_url.trim() || null,
+        video_url: uploadedVideoUrl || form.video_url.trim() || null,
         description: form.description.trim() || null,
         stem_1_name: form.stem_1_name.trim() || null,
         stem_2_name: form.stem_2_name.trim() || null,
@@ -320,14 +370,22 @@ const Admin = () => {
                 <Select value={form.category} onValueChange={(v) => setForm((f) => ({ ...f, category: v }))}>
                   <SelectTrigger className="bg-secondary/50"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="post">Post Production</SelectItem>
-                    <SelectItem value="recordings">Recordings &amp; Mixes</SelectItem>
+                  <SelectItem value="post-production">Post Production</SelectItem>
+                  <SelectItem value="recording">Recordings &amp; Mixes</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Video URL</label>
-                <Input value={form.video_url} onChange={(e) => setForm((f) => ({ ...f, video_url: e.target.value }))} placeholder="https://www.youtube.com/watch?v=..." className="bg-secondary/50" />
+              <div className="space-y-2">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Video URL</label>
+                  <Input
+                    value={form.video_url}
+                    onChange={(e) => setForm((f) => ({ ...f, video_url: e.target.value }))}
+                    placeholder="https://www.youtube.com/watch?v=... or https://.../video.mp4"
+                    className="bg-secondary/50"
+                  />
+                </div>
+                <VideoFileInput />
               </div>
             </div>
 

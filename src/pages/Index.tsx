@@ -223,6 +223,17 @@ const Index = () => {
     handlePlay();
   }, [handlePause, handlePlay, projects.isPlaying]);
 
+  // Listen for global "force-play" events dispatched by faders.
+  useEffect(() => {
+    const handler = () => {
+      if (!projects.isPlaying) {
+        handlePlay();
+      }
+    };
+    window.addEventListener("force-play", handler);
+    return () => window.removeEventListener("force-play", handler);
+  }, [handlePlay, projects.isPlaying]);
+
   const handleFaderChange = useCallback(
     (index: number, value: number) => {
       ensureAnalyserOnce();
@@ -266,8 +277,9 @@ const Index = () => {
           }
         }
 
-        // Fader-triggered playback: upward cross of the -9.5 dB (~20.8%) threshold
-        if (index < 5 && prevValue < FADER_PLAY_THRESHOLD && value >= FADER_PLAY_THRESHOLD && !projects.isPlaying) {
+        // Fader-triggered playback: upward cross of the -9.5 dB (~20.8%) threshold.
+        // Use the latest playing state via ref so we don't retrigger while already playing.
+        if (index <= 5 && prevValue < FADER_PLAY_THRESHOLD && value >= FADER_PLAY_THRESHOLD && !isPlayingRef.current) {
           shouldPlay = true;
           shouldPulse = true;
           playFiredRef.current = true;
