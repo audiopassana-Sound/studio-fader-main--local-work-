@@ -21,14 +21,7 @@ interface ChannelState {
   motorized?: boolean;
 }
 
-const DEFAULT_VIDEO_URL = "https://www.youtube.com/watch?v=EeOsFxf2EZ8";
-
-const getInitialChannels = (project?: {
-  stem1Name?: string;
-  stem2Name?: string;
-  stem3Name?: string;
-  stem4Name?: string;
-}): ChannelState[] => [
+const getInitialChannels = (project?: { stems?: { name?: string; url: string }[] }): ChannelState[] => [
   {
     name: "MIX",
     value: 0,
@@ -39,65 +32,64 @@ const getInitialChannels = (project?: {
     color:
       "radial-gradient(ellipse at center, hsl(210 80% 25%) 0%, hsl(220 60% 10%) 100%)",
   },
-  {
-    name: project?.stem1Name || "STEM 1",
-    value: 0,
-    userValue: 0,
-    muted: false,
-    soloed: false,
-    pan: 0,
-    showUpload: true,
-    color:
+  ...((project?.stems || []).map((stem, stemIdx) => {
+    const stemColors = [
       "radial-gradient(ellipse at 30% 40%, hsl(0 70% 30%) 0%, hsl(350 50% 8%) 100%)",
-  },
-  {
-    name: project?.stem2Name || "STEM 2",
-    value: 0,
-    userValue: 0,
-    muted: false,
-    soloed: false,
-    pan: 0,
-    showUpload: true,
-    color:
       "radial-gradient(ellipse at 70% 30%, hsl(142 60% 25%) 0%, hsl(160 40% 6%) 100%)",
-  },
-  {
-    name: project?.stem3Name || "STEM 3",
-    value: 0,
-    userValue: 0,
-    muted: false,
-    soloed: false,
-    pan: 0,
-    showUpload: true,
-    color:
       "radial-gradient(ellipse at 50% 60%, hsl(38 80% 30%) 0%, hsl(30 60% 8%) 100%)",
-  },
-  {
-    name: project?.stem4Name || "STEM 4",
-    value: 0,
-    userValue: 0,
-    muted: false,
-    soloed: false,
-    pan: 0,
-    showUpload: true,
-    color:
       "radial-gradient(ellipse at 40% 50%, hsl(270 60% 30%) 0%, hsl(280 40% 8%) 100%)",
-  },
+    ];
+    return {
+      name: stem.name || `STEM ${stemIdx + 1}`,
+      value: 0,
+      userValue: 0,
+      muted: false,
+      soloed: false,
+      pan: 0,
+      showUpload: true,
+      color: stemColors[stemIdx % stemColors.length],
+    };
+  }) as ChannelState[]),
   { name: "MASTER", value: 75, userValue: 75, muted: false, soloed: false, pan: 0, isMaster: true, color: "" },
 ];
 
 const Index = () => {
   const projects = useProjects();
+  const rawVideoUrl = projects.currentProject?.videoUrl?.trim() || "";
+  const hasUploadedVideoFile = /\/storage\/v1\/object\/public\/video_files\//i.test(rawVideoUrl);
+  const hasExternalVideoLink = !hasUploadedVideoFile && !!rawVideoUrl;
+  const effectiveVideoUrl = hasUploadedVideoFile
+    ? rawVideoUrl
+    : hasExternalVideoLink
+      ? rawVideoUrl
+      : undefined;
+  const hasMixAudioFile = !!projects.currentProject?.audioMixUrl;
+  const mixUsesAudioFile = !effectiveVideoUrl && hasMixAudioFile;
+  const isNativeVideoSource =
+    !!effectiveVideoUrl &&
+    !/youtube\.com|youtu\.be|youtube-nocookie\.com|vimeo\.com|player\.vimeo\.com/i.test(effectiveVideoUrl);
+  const mixUsesWebAudioChannel = mixUsesAudioFile || isNativeVideoSource;
   const [channels, setChannels] = useState<ChannelState[]>(getInitialChannels(projects.currentProject));
-  // Threshold where fader auto-starts playback: -9.5 dB on our scale.
-  // ChannelStrip maps 0–100 → dB via: dB = (value / 100) * 12 - 12
-  // Solving for -9.5 dB gives ≈ 20.8%
-  const FADER_PLAY_THRESHOLD = 20.8;
+  // Derive indexes from current channel state (not project metadata) to avoid
+  // transient mismatches during async project switches.
+  const masterIndex = Math.max(1, channels.length - 1);
+  const playableCount = Math.max(1, channels.length - 1); // mix + stems, excludes master
+  const [activeAudioMode, setActiveAudioMode] = useState<"mix" | "stems" | "idle">("idle");
+  // -8.0 dB on our 0..100 scale:
+  // dB = (value/100)*12 - 12 => value = ((-8 + 12)/12)*100 = 33.333...
+  const MIX_PLAY_BOOTSTRAP_VALUE = 33.333;
+  const persistedMixRef = useRef(0);
+  const persistedStemsByProjectRef = useRef<Record<string, number[]>>({});
+  const persistedMasterRef = useRef(75);
   const audio = useAudioEngine();
   const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
-  const motorizedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const playFiredRef = useRef(false);
   const playPulseTriggerRef = useRef<(() => void) | null>(null);
+  const hadAudibleActivityRef = useRef(false);
+  const manualPauseRef = useRef(false);
+  const masterVideoReadyRef = useRef(!isNativeVideoSource);
+  const pendingPlayRef = useRef(false);
+  const handlePlayRef = useRef<(() => Promise<void>) | null>(null);
+  const prevPlayableCountRef = useRef(playableCount);
   // Backwards-compat shim: avoid runtime crash if any stale JSX still references this identifier.
   const playPulseNonce = 0;
 
@@ -116,31 +108,91 @@ const Index = () => {
     if (prevCategory.current !== projects.category || prevProjectId.current !== projects.currentProject?.id) {
       prevCategory.current = projects.category;
       prevProjectId.current = projects.currentProject?.id;
-      setChannels(getInitialChannels(projects.currentProject));
+      const baseChannels = getInitialChannels(projects.currentProject);
+      const projectKey = projects.currentProject?.id || "__default__";
+      const persistedStems = persistedStemsByProjectRef.current[projectKey] || [];
+      const nextChannels = baseChannels.map((ch, i) => {
+        if (i === 0) {
+          return { ...ch, value: persistedMixRef.current, userValue: persistedMixRef.current };
+        }
+        if (i === baseChannels.length - 1) {
+          return { ...ch, value: persistedMasterRef.current, userValue: persistedMasterRef.current };
+        }
+        const stemIdx = i - 1;
+        const persistedStem = persistedStems[stemIdx] ?? 0;
+        return { ...ch, value: persistedStem, userValue: persistedStem };
+      });
+      setChannels(nextChannels);
       setAnalyserNode(null);
-      playFiredRef.current = false;
+      hadAudibleActivityRef.current = false;
+      pendingPlayRef.current = false;
+      masterVideoReadyRef.current = !isNativeVideoSource;
       projects.stopPlay();
       audio.stopAll();
 
-      // Load audio sources for this project (MIX + 4 stems)
-      audio.setChannelUrl(0, projects.currentProject?.audioMixUrl);
-      audio.setChannelUrl(1, projects.currentProject?.stem1Url);
-      audio.setChannelUrl(2, projects.currentProject?.stem2Url);
-      audio.setChannelUrl(3, projects.currentProject?.stem3Url);
-      audio.setChannelUrl(4, projects.currentProject?.stem4Url);
+      // Priority routing for MIX channel:
+      // 1) Uploaded video file audio track
+      // 2) External video link audio track
+      // 3) Uploaded audio_mix_url
+      // If a video source is present, MIX channel 0 audio file is disabled.
+      audio.setChannelUrl(0, mixUsesAudioFile ? projects.currentProject?.audioMixUrl : undefined);
+      (projects.currentProject?.stems || []).forEach((stem, idx) => {
+        audio.setChannelUrl(idx + 1, stem.url);
+      });
+      // Clear any leftover channels from previous project with more stems.
+      const prevCount = prevPlayableCountRef.current;
+      const nextCount = (projects.currentProject?.stems?.length ?? 0) + 1;
+      for (let i = nextCount; i < prevCount; i++) {
+        audio.setChannelUrl(i, undefined);
+      }
+      prevPlayableCountRef.current = nextCount;
 
-      for (let i = 0; i < 5; i++) audio.setChannelGain(i, 0, false);
-      audio.setMasterGain(75);
+      // Keep master level persistent across project changes too.
+      audio.setMasterGain(persistedMasterRef.current);
     }
-  }, [projects.category, projects.currentProject?.id, audio, projects.currentProject, projects.stopPlay]);
+  }, [
+    projects.category,
+    projects.currentProject?.id,
+    projects.currentProject,
+    projects.stopPlay,
+    audio,
+    isNativeVideoSource,
+    mixUsesAudioFile,
+  ]);
 
+  // Persist MIX/MASTER globally, and stems per project to avoid cross-project index bleed.
+  useEffect(() => {
+    persistedMixRef.current = channels[0]?.value ?? 0;
+    persistedMasterRef.current = channels[Math.max(1, channels.length - 1)]?.value ?? 75;
+    const projectKey = projects.currentProject?.id || "__default__";
+    persistedStemsByProjectRef.current[projectKey] = channels
+      .slice(1, Math.max(1, channels.length - 1))
+      .map((ch) => ch.value);
+  }, [channels, projects.currentProject?.id]);
+
+  const deriveAudioMode = useCallback((chs: ChannelState[]): "mix" | "stems" | "idle" => {
+    const dynamicMasterIndex = Math.max(1, chs.length - 1);
+    const stemVolumes = chs.slice(1, dynamicMasterIndex).map((ch) => ch.value);
+    const anyStemRaised = stemVolumes.some((v) => v > 0);
+    const mixRaised = (chs[0]?.value ?? 0) > 0;
+    if (activeAudioMode === "mix" && mixRaised) return "mix";
+    if (activeAudioMode === "stems" && anyStemRaised) return "stems";
+    if (anyStemRaised) return "stems";
+    if (mixRaised) return "mix";
+    return "idle";
+  }, [activeAudioMode]);
+
+  useEffect(() => {
+    const nextMode = deriveAudioMode(channels);
+    if (activeAudioMode !== nextMode) setActiveAudioMode(nextMode);
+  }, [channels, activeAudioMode, deriveAudioMode]);
 
   // Find the first active (non-muted, value > 0) channel for M shortcut
   const activeChannelRef = useRef(0);
   useEffect(() => {
-    const idx = channels.findIndex((ch, i) => i < 5 && ch.value > 0 && !ch.muted);
+    const idx = channels.findIndex((ch, i) => i < masterIndex && ch.value > 0 && !ch.muted);
     activeChannelRef.current = idx >= 0 ? idx : 0;
-  }, [channels]);
+  }, [channels, masterIndex]);
 
   // Animate VU meters based on fader values + playing state
   const channelsRef = useRef(channels);
@@ -148,10 +200,10 @@ const Index = () => {
   const isPlayingRef = useRef(projects.isPlaying);
   isPlayingRef.current = projects.isPlaying;
 
-  const vuLevelsRef = useRef<number[]>([0, 0, 0, 0, 0, 0]);
+  const vuLevelsRef = useRef<number[]>(Array.from({ length: channels.length }, () => 0));
   const vuSources = useMemo(
-    () => Array.from({ length: 6 }, (_, i) => () => vuLevelsRef.current[i] ?? 0),
-    []
+    () => Array.from({ length: channels.length }, (_, i) => () => vuLevelsRef.current[i] ?? 0),
+    [channels.length]
   );
 
   useEffect(() => {
@@ -161,15 +213,15 @@ const Index = () => {
       const chs = channelsRef.current;
       const playing = isPlayingRef.current;
 
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < channelsRef.current.length; i++) {
         const ch = chs[i];
         if (!ch) {
           vuLevelsRef.current[i] = 0;
           continue;
         }
 
-        if (i === 5) {
-          const maxCh = Math.max(...chs.slice(0, 5).map((c) => (c.muted ? 0 : c.value)));
+        if (i === masterIndex) {
+          const maxCh = Math.max(0, ...chs.slice(0, masterIndex).map((c) => (c.muted ? 0 : c.value)));
           if (maxCh === 0 || !playing) {
             vuLevelsRef.current[i] = 0;
             continue;
@@ -190,27 +242,65 @@ const Index = () => {
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [masterIndex, channels.length]);
 
   const ensureAnalyserOnce = useCallback(() => {
     audio.ensureAudio();
+    void audio.resumeAudio();
     if (!analyserNode) {
       const a = audio.getAnalyser();
       if (a) setAnalyserNode(a);
     }
   }, [audio, analyserNode]);
 
+  const handleMixMediaElementChange = useCallback(
+    (element: HTMLMediaElement | null) => {
+      if (isNativeVideoSource && element) {
+        audio.bindChannelMediaElement(0, element);
+        return;
+      }
+      audio.bindChannelMediaElement(0, null);
+    },
+    [audio, isNativeVideoSource]
+  );
+
+  const getPlaybackModeFromLevels = useCallback((chs: ChannelState[]): "mix" | "stems" | "idle" => {
+    return deriveAudioMode(chs);
+  }, [deriveAudioMode]);
+
   // Single source of truth for starting/stopping playback.
   // The TransportControls Play button uses the toggle; fader auto-play uses handlePlay().
-  const handlePlay = useCallback(() => {
+  const handlePlay = useCallback(async (forcedMode?: "mix" | "stems", forcedActiveAudioIndices?: number[]) => {
     if (projects.isPlaying) return;
     ensureAnalyserOnce();
-    void audio.playAll();
+    await audio.resumeAudio();
+    const mode = forcedMode ?? getPlaybackModeFromLevels(channelsRef.current);
+    if (mode === "idle") return;
+    manualPauseRef.current = false;
+    setActiveAudioMode(mode);
+
+    const activeAudioIndices =
+      forcedActiveAudioIndices ??
+      channelsRef.current
+        .slice(0, masterIndex)
+        .map((ch, i) => ({ ch, i }))
+        .filter(({ ch, i }) => {
+          if (mode === "mix") return i === 0 && ch.value > 0;
+          return i >= 1 && i < masterIndex && ch.value > 0;
+        })
+        .map(({ i }) => i);
+    await audio.waitForReady(activeAudioIndices);
+    if (isNativeVideoSource && !masterVideoReadyRef.current) {
+      pendingPlayRef.current = true;
+      return;
+    }
+    await audio.playAll();
     projects.startPlay();
-  }, [audio, ensureAnalyserOnce, projects.isPlaying, projects.startPlay]);
+  }, [audio, ensureAnalyserOnce, getPlaybackModeFromLevels, isNativeVideoSource, projects.isPlaying, projects.startPlay, masterIndex]);
 
   const handlePause = useCallback(() => {
     if (!projects.isPlaying) return;
+    manualPauseRef.current = true;
     audio.pauseAll();
     projects.stopPlay();
   }, [audio, projects.isPlaying, projects.stopPlay]);
@@ -220,99 +310,183 @@ const Index = () => {
       handlePause();
       return;
     }
-    handlePlay();
-  }, [handlePause, handlePlay, projects.isPlaying]);
+    const mixRaised = channelsRef.current[0]?.value > 0;
+    const anyStemRaised = channelsRef.current.slice(1, masterIndex).some((ch) => ch.value > 0);
 
-  // Listen for global "force-play" events dispatched by faders.
+    // If all faders are down, bootstrap MIX to -8.0 dB so play is audible/visible immediately.
+    if (!mixRaised && !anyStemRaised) {
+      setChannels((prev) => {
+        const next = [...prev];
+        next[0] = {
+          ...next[0],
+          muted: false,
+          value: MIX_PLAY_BOOTSTRAP_VALUE,
+          userValue: MIX_PLAY_BOOTSTRAP_VALUE,
+        };
+        return next;
+      });
+      setActiveAudioMode("mix");
+      void handlePlay("mix", [0]);
+      return;
+    }
+
+    // Explicit Play should honor current fader levels and active source.
+    void handlePlay();
+  }, [handlePause, handlePlay, projects.isPlaying, masterIndex]);
+
   useEffect(() => {
-    const handler = () => {
-      if (!projects.isPlaying) {
-        handlePlay();
+    handlePlayRef.current = handlePlay;
+  }, [handlePlay]);
+
+  const handleMasterMediaEvent = useCallback(
+    (event: "play" | "pause" | "seeking" | "seeked" | "waiting" | "canplay" | "time", currentTime: number) => {
+      if (!isNativeVideoSource) return;
+
+      if (event === "canplay") {
+        masterVideoReadyRef.current = true;
+        if (pendingPlayRef.current && !isPlayingRef.current) {
+          pendingPlayRef.current = false;
+          void handlePlayRef.current?.();
+        }
+        return;
       }
-    };
-    window.addEventListener("force-play", handler);
-    return () => window.removeEventListener("force-play", handler);
-  }, [handlePlay, projects.isPlaying]);
+
+      if (event === "time") {
+        if (isPlayingRef.current) audio.correctDrift(currentTime, 0.15);
+        return;
+      }
+
+      audio.mirrorMasterEvent(event, currentTime);
+    },
+    [audio, isNativeVideoSource]
+  );
 
   const handleFaderChange = useCallback(
     (index: number, value: number) => {
       ensureAnalyserOnce();
-
-      let shouldPlay = false;
-      let shouldPause = false;
-      let shouldPulse = false;
+      if (index < masterIndex && value > 0) {
+        // User touch on audible faders should re-enable auto-play behavior.
+        manualPauseRef.current = false;
+      }
 
       setChannels((prev) => {
         const next = [...prev];
         const prevCh = next[index];
         if (!prevCh) return prev;
 
-        const prevValue = prevCh.value;
         next[index] = { ...prevCh, value, userValue: value };
 
-        // MIX fader logic: engaging MIX kills stems (motorized pull-down)
+        // Engaging MIX should mute stems for audio routing without moving their sliders.
         if (index === 0 && value > 0) {
-          const anyStemActive = prev.slice(1, 5).some((ch) => ch.value > 0 && !ch.muted);
+          const anyStemActive = prev.slice(1, masterIndex).some((ch) => ch.value > 0);
           if (anyStemActive) {
-            for (let i = 1; i <= 4; i++) {
-              next[i] = { ...next[i], muted: true, motorized: true, value: 0, userValue: 0 };
-              audio.setChannelGain(i, 0, true);
+            for (let i = 1; i < masterIndex; i++) {
+              next[i] = { ...next[i], muted: true, motorized: false };
             }
-            if (motorizedTimerRef.current) clearTimeout(motorizedTimerRef.current);
-            motorizedTimerRef.current = setTimeout(() => {
-              setChannels((p) => {
-                const cleared = [...p];
-                for (let i = 1; i <= 4; i++) cleared[i] = { ...cleared[i], motorized: false };
-                return cleared;
-              });
-            }, 1600);
           }
+          next[0] = { ...next[0], muted: false, motorized: false };
+          setActiveAudioMode("mix");
         }
 
-        // MIX at 0 releases stem mutes
+        // Reverse A/B visuals: engaging ANY stem mutes MIX, but must not
+        // change MIX numeric value. This preserves the user's exact MIX fader state.
+        if (index >= 1 && index < masterIndex && value > 0) {
+          const mixIsActive = (prev[0]?.value ?? 0) > 0;
+          if (mixIsActive) {
+            next[0] = { ...next[0], muted: true, motorized: false };
+          }
+          for (let i = 1; i < masterIndex; i++) {
+            next[i] = { ...next[i], muted: false, motorized: false };
+          }
+          setActiveAudioMode("stems");
+        }
+
+        // MIX at 0 releases stem mutes visually.
         if (index === 0 && value === 0) {
-          for (let i = 1; i <= 4; i++) {
+          for (let i = 1; i < masterIndex; i++) {
             next[i] = { ...next[i], muted: false };
-            audio.setChannelGain(i, next[i].value, false);
+          }
+          const anyStemActive = next.slice(1, masterIndex).some((ch) => ch.value > 0);
+          setActiveAudioMode(anyStemActive ? "stems" : "idle");
+        }
+
+        // If all stems are intentionally lowered to 0, return to MIX mode.
+        // Do not modify MIX numeric value here.
+        if (index >= 1 && index < masterIndex) {
+          const stemVolumes = next.slice(1, masterIndex).map((ch) => ch.value);
+          const allStemsZero = stemVolumes.every((v) => v === 0);
+          if (allStemsZero) {
+            next[0] = {
+              ...next[0],
+              muted: false,
+              motorized: false,
+            };
+            setActiveAudioMode((next[0]?.value ?? 0) > 0 ? "mix" : "idle");
           }
         }
-
-        // Fader-triggered playback: upward cross of the -9.5 dB (~20.8%) threshold.
-        // Use the latest playing state via ref so we don't retrigger while already playing.
-        if (index <= 5 && prevValue < FADER_PLAY_THRESHOLD && value >= FADER_PLAY_THRESHOLD && !isPlayingRef.current) {
-          shouldPlay = true;
-          shouldPulse = true;
-          playFiredRef.current = true;
-        }
-
-        // Auto-pause: if this fader hit 0, check if ALL channels 0-4 are now at 0
-        if (index < 5 && value === 0) {
-          const allZero = next.slice(0, 5).every((ch) => ch.value === 0);
-          if (allZero) {
-            shouldPause = true;
-            playFiredRef.current = false;
-          }
-        }
-
-        // Audio sync: update only the channel that changed (and master when needed)
-        if (index < 5) audio.setChannelGain(index, value, next[index].muted);
-        if (index === 5) audio.setMasterGain(value);
 
         return next;
       });
-
-      if (shouldPlay) {
-        // Use the exact same play logic as the main Play button.
-        handlePlay();
-      }
-      if (shouldPause) {
-        // Use the exact same pause logic as the main Play button.
-        handlePause();
-      }
-      if (shouldPulse) playPulseTriggerRef.current?.();
     },
-    [ensureAnalyserOnce, handlePause, handlePlay]
+    [ensureAnalyserOnce, masterIndex]
   );
+
+  // Centralized media-control state machine (A/B exclusivity + transport).
+  useEffect(() => {
+    const mixLevel = channels[0]?.value ?? 0;
+    const stems = channels.slice(1, masterIndex);
+    const master = channels[masterIndex]?.value ?? 75;
+    const anyStemRaised = stems.some((ch) => ch.value > 0);
+    const anySoloed = stems.some((ch) => ch.soloed);
+    const mode = deriveAudioMode(channels);
+
+    // Rule 1: Exclusive A/B Audio State
+    if (mode === "stems") {
+      // Mix hard mute
+      audio.setChannelGain(0, 0, true);
+
+      // Active stems unmute (respect solo routing)
+      stems.forEach((ch, i) => {
+        const shouldAudible = ch.value > 0 && (!anySoloed || ch.soloed);
+        audio.setChannelGain(i + 1, shouldAudible ? ch.value : 0, !shouldAudible);
+      });
+    } else if (mode === "mix") {
+      // Mix active path
+      if (mixUsesWebAudioChannel) {
+        audio.setChannelGain(0, mixLevel, false);
+      } else {
+        // For video/external mix sources, channel 0 HTMLAudio should stay silent.
+        audio.setChannelGain(0, 0, true);
+      }
+
+      // All stems hard mute
+      for (let i = 1; i < masterIndex; i++) {
+        audio.setChannelGain(i, 0, true);
+      }
+    } else {
+      // Idle: hard mute all mix/stem audio channels
+      for (let i = 0; i < masterIndex; i++) {
+        audio.setChannelGain(i, 0, true);
+      }
+    }
+
+    // Master gain always follows master fader.
+    audio.setMasterGain(master);
+
+    // Rule 2: Unified Video Playback
+    const shouldPlay = mode !== "idle";
+    if (shouldPlay && !projects.isPlaying && !manualPauseRef.current) {
+      void handlePlay();
+      if (!hadAudibleActivityRef.current) {
+        playPulseTriggerRef.current?.();
+      }
+      hadAudibleActivityRef.current = true;
+    } else if (!shouldPlay && projects.isPlaying) {
+      handlePause();
+      hadAudibleActivityRef.current = false;
+      manualPauseRef.current = false;
+    }
+  }, [channels, deriveAudioMode, audio, mixUsesWebAudioChannel, projects.isPlaying, handlePlay, handlePause, masterIndex]);
 
 
   const handleMuteToggle = useCallback(
@@ -320,11 +494,11 @@ const Index = () => {
       setChannels((prev) => {
         const next = [...prev];
         next[index] = { ...next[index], muted: !next[index].muted };
-        if (index < 5) audio.setChannelGain(index, next[index].value, next[index].muted);
+        if (index < masterIndex) audio.setChannelGain(index, next[index].value, next[index].muted);
         return next;
       });
     },
-    [audio]
+    [audio, masterIndex]
   );
 
   const handleSoloToggle = useCallback(
@@ -332,11 +506,11 @@ const Index = () => {
       setChannels((prev) => {
         const next = [...prev];
         next[index] = { ...next[index], soloed: !next[index].soloed };
-        audio.applySoloState(next.slice(0, 5));
+        audio.applySoloState(next.slice(0, masterIndex));
         return next;
       });
     },
-    [audio]
+    [audio, masterIndex]
   );
 
   const handlePanChange = useCallback(
@@ -345,11 +519,11 @@ const Index = () => {
       setChannels((prev) => {
         const next = [...prev];
         next[index] = { ...next[index], pan };
-        if (index < 5) audio.setChannelPan(index, pan);
+        if (index < masterIndex) audio.setChannelPan(index, pan);
         return next;
       });
     },
-    [audio, ensureAnalyserOnce]
+    [audio, ensureAnalyserOnce, masterIndex]
   );
 
   // Keyboard shortcuts
@@ -362,22 +536,28 @@ const Index = () => {
     }, [handleMuteToggle]),
   });
 
-  const anySoloed = channels.slice(0, 5).some((ch) => ch.soloed);
-  const screenLayers = channels.slice(0, 5).map((ch) => {
-    const shouldShow = !ch.muted && (!anySoloed || ch.soloed);
+  const anySoloed = channels.slice(0, masterIndex).some((ch) => ch.soloed);
+  const stemVolumes = channels.slice(1, masterIndex).map((ch) => ch.value);
+  const anyStemRaised = stemVolumes.some((v) => v > 0);
+  const screenLayers = channels.slice(0, masterIndex).map((ch, i) => {
+    if (i === 0) {
+      const mixVisualValue = activeAudioMode === "stems" && anyStemRaised ? 100 : ch.value;
+      return { label: ch.name, opacity: mixVisualValue / 100, color: ch.color };
+    }
+    const shouldShow = !ch.muted && (!anySoloed || ch.soloed) && ch.value > 0;
     return { label: ch.name, opacity: shouldShow ? ch.value / 100 : 0, color: ch.color };
   });
 
   // Master fader is audio-only; visuals always at full brightness
   const masterBrightness = 1;
 
-  // YouTube volume: MIX fader (ch0) scaled by MASTER fader (ch5)
-  const mixValue = channels[0].muted ? 0 : channels[0].value;
-  const masterValue = channels[5].value;
+  // Mix media volume follows declarative mode.
+  const mixValue = activeAudioMode === "stems" ? 0 : (channels[0]?.value ?? 0);
+  const masterValue = channels[masterIndex]?.value ?? 75;
   const computedVolume = (mixValue / 100) * (masterValue / 100) * 100;
 
   // Visualizer amplitude: max active fader level × master, 0 when paused
-  const maxActiveFader = Math.max(...channels.slice(0, 5).map((ch) => (ch.muted ? 0 : ch.value)));
+  const maxActiveFader = Math.max(0, ...channels.slice(0, masterIndex).map((ch) => (ch.muted ? 0 : ch.value)));
   const visualizerAmplitude = projects.isPlaying && maxActiveFader > 0 ? (maxActiveFader / 100) * (masterValue / 100) : 0;
 
   const handleBeforePortfolio = useCallback(() => {
@@ -385,8 +565,14 @@ const Index = () => {
     audio.stopAll();
   }, [projects.stopPlay, audio]);
 
-
-  const effectiveVideoUrl = projects.currentProject?.videoUrl || DEFAULT_VIDEO_URL;
+  // Do not fall back to any hardcoded media URL; only use project URLs from Supabase.
+  if (channels.length < 2) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background text-muted-foreground">
+        Loading...
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-screen bg-background overflow-hidden select-none">
@@ -402,8 +588,12 @@ const Index = () => {
           masterBrightness={masterBrightness}
           analyserNode={analyserNode}
           videoUrl={effectiveVideoUrl}
+          showBlankWhenNoVideo={mixUsesAudioFile}
           isPlaying={projects.isPlaying}
           onVideoEnded={projects.stopPlay}
+          onMasterMediaEvent={handleMasterMediaEvent}
+          onMixMediaElementChange={handleMixMediaElementChange}
+          mixMuted={activeAudioMode === "stems"}
           volume={computedVolume}
           amplitude={visualizerAmplitude}
         />

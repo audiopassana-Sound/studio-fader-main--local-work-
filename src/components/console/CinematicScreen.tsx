@@ -1,4 +1,4 @@
-import { memo, useRef, useEffect, useCallback, useMemo, useState } from "react";
+import { memo, useRef, useEffect, useCallback, useMemo, useState, type MutableRefObject } from "react";
 import yanivBg from "@/assets/yaniv-bg.png";
 import { toYouTubeEmbedBaseUrl } from "@/lib/youtube";
 import AudioVisualizer from "./AudioVisualizer";
@@ -16,27 +16,64 @@ interface CinematicScreenProps {
   masterBrightness: number;
   analyserNode: AnalyserNode | null;
   videoUrl?: string;
+  showBlankWhenNoVideo?: boolean;
   isPlaying?: boolean;
   onVideoEnded?: () => void;
+  onMasterMediaEvent?: (
+    event: "play" | "pause" | "seeking" | "seeked" | "waiting" | "canplay" | "time",
+    currentTime: number
+  ) => void;
+  onMixMediaElementChange?: (element: HTMLMediaElement | null) => void;
+  mixMuted?: boolean;
+  /** Parent-owned ref to explicitly wake the active MIX media source. */
+  mixReviveTriggerRef?: MutableRefObject<((mixVolume: number) => void) | null>;
   /** 0-100 volume for YouTube iframe */
   volume?: number;
   /** 0-1 amplitude for visualizer */
   amplitude?: number;
 }
 
-// Non-linear curve: fader at ~20% → video fully visible
+// Fade starts immediately and reaches full natural visuals at -9.0 dB.
+// Channel scale is 0..100 with: dB = (value / 100) * 12 - 12
+// Solving for -9.0 dB gives value = 25 => normalized target = 0.25.
+// Above this target, visual intensity is capped at 1.0 while audio can still increase.
+const TARGET_VISUAL_FADE = 0.25;
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
 function videoOpacity(faderNorm: number): number {
   if (faderNorm <= 0) return 0;
-  return Math.min(1, Math.pow(faderNorm / 0.2, 2.5));
+  const t = clamp01(faderNorm / TARGET_VISUAL_FADE);
+  // Smoothstep: starts early, feels smooth, and hard-caps at 1.0
+  return t * t * (3 - 2 * t);
 }
 
 const CinematicScreen = memo(
-  ({ layers, masterBrightness, analyserNode, videoUrl, isPlaying, onVideoEnded, volume = 75, amplitude = 0 }: CinematicScreenProps) => {
+  ({
+    layers,
+    masterBrightness,
+    analyserNode,
+    videoUrl,
+    showBlankWhenNoVideo = false,
+    isPlaying,
+    onVideoEnded,
+    onMasterMediaEvent,
+    onMixMediaElementChange,
+    mixMuted = false,
+    mixReviveTriggerRef,
+    volume = 75,
+    amplitude = 0,
+  }: CinematicScreenProps) => {
     const maxLayerOpacity = Math.max(0, ...layers.map((l) => l.opacity));
     const hasActive = maxLayerOpacity > 0;
 
-    // Drive video visibility directly from the most-active fader so the "-8dB / 20%" rule feels immediate.
-    const screenOpacity = videoOpacity(maxLayerOpacity) * masterBrightness;
+    // Drive visual fade from fader with hard cap to avoid overexposure.
+    const visualProgress = videoOpacity(maxLayerOpacity);
+    const screenOpacity = clamp01(visualProgress * clamp01(masterBrightness));
+    // Keep CSS brightness at or below natural baseline (1.0 max).
+    const screenBrightness = clamp01(0.35 + visualProgress * 0.65);
     const videoFullyVisible = screenOpacity >= 0.95;
     const showVideo = !!videoUrl;
 
@@ -44,31 +81,52 @@ const CinematicScreen = memo(
       if (!videoUrl) return false;
       return /youtube\.com|youtu\.be|youtube-nocookie\.com/i.test(videoUrl);
     }, [videoUrl]);
+    const isVimeoSource = useMemo(() => {
+      if (!videoUrl) return false;
+      return /vimeo\.com|player\.vimeo\.com/i.test(videoUrl);
+    }, [videoUrl]);
+    const isExternalIframeSource = isYouTubeSource || isVimeoSource;
 
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const prevPlaying = useRef<boolean | undefined>(undefined);
+    const setVideoElement = useCallback(
+      (element: HTMLVideoElement | null) => {
+        videoRef.current = element;
+        onMixMediaElementChange?.(element);
+      },
+      [onMixMediaElementChange]
+    );
 
     // Scrubber state
     const [progress, setProgress] = useState(0);
     const [duration, setDuration] = useState(0);
 
-    const sendYTCommand = useCallback(
+    const sendExternalCommand = useCallback(
       (command: string, args: unknown[] = []) => {
-        if (!isYouTubeSource) return;
+        if (!isExternalIframeSource) return;
         const win = iframeRef.current?.contentWindow;
         if (!win) return;
 
-        // YouTube IFrame API postMessage format
-        const payload = {
-          event: "command",
-          func: command,
-          args: args.length ? args : "",
-        };
+        const payload = isYouTubeSource
+          ? {
+              event: "command",
+              func: command,
+              args: args.length ? args : "",
+            }
+          : // Vimeo player postMessage format (requires api=1)
+            (args.length
+              ? {
+                  method: command,
+                  value: args[0],
+                }
+              : {
+                  method: command,
+                });
 
         win.postMessage(JSON.stringify(payload), "*");
       },
-      [isYouTubeSource]
+      [isExternalIframeSource, isYouTubeSource]
     );
 
     // Send play/pause whenever isPlaying changes
@@ -76,8 +134,12 @@ const CinematicScreen = memo(
       if (prevPlaying.current === isPlaying) return;
       prevPlaying.current = isPlaying;
 
-      if (isYouTubeSource) {
-        sendYTCommand(isPlaying ? "playVideo" : "pauseVideo");
+      if (isExternalIframeSource) {
+        if (isYouTubeSource) {
+          sendExternalCommand(isPlaying ? "playVideo" : "pauseVideo");
+        } else {
+          sendExternalCommand(isPlaying ? "play" : "pause");
+        }
         return;
       }
 
@@ -91,54 +153,134 @@ const CinematicScreen = memo(
       } else {
         el.pause();
       }
-    }, [isPlaying, isYouTubeSource, sendYTCommand]);
+    }, [isPlaying, isExternalIframeSource, isYouTubeSource, sendExternalCommand]);
 
 
-  // Re-send playVideo after iframe loads if already supposed to be playing
+  // Re-send play command after iframe loads if already supposed to be playing
   const onIframeLoad = useCallback(() => {
-    if (!isYouTubeSource) return;
+    if (!isExternalIframeSource) return;
     setTimeout(() => {
+      if (isVimeoSource) {
+        // Subscribe to Vimeo events so transport/progress logic mirrors YouTube behavior.
+        sendExternalCommand("addEventListener", ["timeupdate"]);
+        sendExternalCommand("addEventListener", ["ended"]);
+        sendExternalCommand("addEventListener", ["seeked"]);
+      }
+
       // If we're supposed to be playing when iframe loads, force play
       if (isPlaying) {
-        sendYTCommand("playVideo");
+        if (isYouTubeSource) {
+          sendExternalCommand("playVideo");
+        } else {
+          sendExternalCommand("play");
+        }
       }
     }, 350);
-  }, [sendYTCommand, isPlaying, isYouTubeSource]);
-
-
-  // Sync volume to YouTube iframe or direct video element
+  }, [sendExternalCommand, isPlaying, isExternalIframeSource, isYouTubeSource, isVimeoSource]);
+  
+  // Sync volume to external iframe. Native video mix volume is WebAudio-driven.
   useEffect(() => {
-    if (isYouTubeSource) {
-      sendYTCommand("setVolume", [Math.round(volume)]);
+    const effectiveVolume = mixMuted ? 0 : volume;
+
+    if (isExternalIframeSource) {
+      if (isYouTubeSource) {
+        sendExternalCommand("setVolume", [Math.round(effectiveVolume)]);
+        if (mixMuted) sendExternalCommand("mute");
+        else sendExternalCommand("unMute");
+      } else {
+        sendExternalCommand("setVolume", [Math.max(0, Math.min(1, effectiveVolume / 100))]);
+      }
       return;
     }
+  }, [volume, mixMuted, sendExternalCommand, isExternalIframeSource, isYouTubeSource]);
 
-    if (videoRef.current) {
-      videoRef.current.volume = Math.max(0, Math.min(1, volume / 100));
-    }
-  }, [volume, sendYTCommand, isYouTubeSource]);
+  // Periodic master clock ticks for drift correction of slave audio elements.
+  useEffect(() => {
+    if (isExternalIframeSource || !isPlaying || !onMasterMediaEvent) return;
+    const timer = setInterval(() => {
+      const t = videoRef.current?.currentTime;
+      if (typeof t === "number" && Number.isFinite(t)) {
+        onMasterMediaEvent("time", t);
+      }
+    }, 250);
+    return () => clearInterval(timer);
+  }, [isExternalIframeSource, isPlaying, onMasterMediaEvent]);
+
+  // Expose an imperative "wake mix media" trigger to parent.
+  useEffect(() => {
+    if (!mixReviveTriggerRef) return;
+
+    const trigger = (mixVolume: number) => {
+      const clampedVolume = Math.max(0, Math.min(100, mixVolume));
+
+      if (isExternalIframeSource) {
+        if (isYouTubeSource) {
+          sendExternalCommand("unMute");
+          sendExternalCommand("setVolume", [Math.round(clampedVolume)]);
+          sendExternalCommand("playVideo");
+        } else {
+          sendExternalCommand("setVolume", [clampedVolume / 100]);
+          sendExternalCommand("play");
+        }
+        return;
+      }
+
+      const el = videoRef.current;
+      if (!el) return;
+      void el.play().catch(() => {
+        // ignore autoplay policy/transient errors
+      });
+    };
+
+    mixReviveTriggerRef.current = trigger;
+    return () => {
+      if (mixReviveTriggerRef.current === trigger) {
+        mixReviveTriggerRef.current = null;
+      }
+    };
+  }, [mixReviveTriggerRef, isExternalIframeSource, isYouTubeSource, sendExternalCommand]);
 
   // Listen for YouTube iframe messages: ended state, current time, duration
   useEffect(() => {
-    if (!isYouTubeSource) return;
+    if (!isExternalIframeSource) return;
 
     const handleMessage = (event: MessageEvent) => {
       try {
         const data = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
-        // ended state
-        if (data?.event === "onStateChange" && data?.info === 0) {
-          onVideoEnded?.();
+        if (isYouTubeSource) {
+          // ended state
+          if (data?.event === "onStateChange" && data?.info === 0) {
+            onVideoEnded?.();
+          }
+          if (data?.event === "infoDelivery" && data?.info?.playerState === 0) {
+            onVideoEnded?.();
+          }
+          // Track progress from infoDelivery
+          if (data?.event === "infoDelivery") {
+            if (typeof data.info?.currentTime === "number" && typeof data.info?.duration === "number" && data.info.duration > 0) {
+              setDuration(data.info.duration);
+              setProgress(data.info.currentTime / data.info.duration);
+            } else if (typeof data.info?.currentTime === "number" && duration > 0) {
+              setProgress(data.info.currentTime / duration);
+            }
+          }
+          return;
         }
-        if (data?.event === "infoDelivery" && data?.info?.playerState === 0) {
-          onVideoEnded?.();
-        }
-        // Track progress from infoDelivery
-        if (data?.event === "infoDelivery") {
-          if (typeof data.info?.currentTime === "number" && typeof data.info?.duration === "number" && data.info.duration > 0) {
-            setDuration(data.info.duration);
-            setProgress(data.info.currentTime / data.info.duration);
-          } else if (typeof data.info?.currentTime === "number" && duration > 0) {
-            setProgress(data.info.currentTime / duration);
+
+        // Vimeo messages
+        if (isVimeoSource) {
+          if (data?.event === "ended") {
+            onVideoEnded?.();
+          }
+          if (data?.event === "timeupdate") {
+            const seconds = Number(data?.data?.seconds);
+            const total = Number(data?.data?.duration);
+            if (Number.isFinite(seconds) && Number.isFinite(total) && total > 0) {
+              setDuration(total);
+              setProgress(seconds / total);
+            } else if (Number.isFinite(seconds) && duration > 0) {
+              setProgress(seconds / duration);
+            }
           }
         }
       } catch {
@@ -148,35 +290,51 @@ const CinematicScreen = memo(
 
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [onVideoEnded, duration, isYouTubeSource]);
+  }, [onVideoEnded, duration, isExternalIframeSource, isYouTubeSource, isVimeoSource]);
 
   const handleSeek = useCallback((fraction: number) => {
     if (duration <= 0) return;
     const seekTime = fraction * duration;
 
-    if (isYouTubeSource) {
-      sendYTCommand("seekTo", [seekTime, true]);
+    if (isExternalIframeSource) {
+      if (isYouTubeSource) {
+        sendExternalCommand("seekTo", [seekTime, true]);
+      } else {
+        sendExternalCommand("setCurrentTime", [seekTime]);
+      }
     } else if (videoRef.current) {
       videoRef.current.currentTime = seekTime;
     }
 
     setProgress(fraction);
-  }, [duration, sendYTCommand, isYouTubeSource]);
+  }, [duration, sendExternalCommand, isExternalIframeSource, isYouTubeSource]);
 
   const embedUrl = useMemo(() => {
-    if (!videoUrl || !isYouTubeSource) return "";
+    if (!videoUrl || !isExternalIframeSource) return "";
+    if (isYouTubeSource) {
+      const base = toYouTubeEmbedBaseUrl(videoUrl);
+      if (!base) return "";
+      const u = new URL(base);
+      u.searchParams.set("enablejsapi", "1");
+      u.searchParams.set("playsinline", "1");
+      u.searchParams.set("origin", window.location.origin);
+      u.searchParams.set("modestbranding", "1");
+      u.searchParams.set("rel", "0");
+      return u.toString();
+    }
 
-    const base = toYouTubeEmbedBaseUrl(videoUrl);
-    if (!base) return "";
-
-    const u = new URL(base);
-    u.searchParams.set("enablejsapi", "1");
+    // Vimeo embed
+    const m = videoUrl.match(/(?:vimeo\.com\/(?:video\/)?)(\d+)/i);
+    const id = m?.[1];
+    if (!id) return "";
+    const u = new URL(`https://player.vimeo.com/video/${id}`);
+    u.searchParams.set("api", "1");
+    u.searchParams.set("player_id", "studio-fader-vimeo");
+    u.searchParams.set("autoplay", "0");
+    u.searchParams.set("muted", "0");
     u.searchParams.set("playsinline", "1");
-    u.searchParams.set("origin", window.location.origin);
-    u.searchParams.set("modestbranding", "1");
-    u.searchParams.set("rel", "0");
     return u.toString();
-  }, [videoUrl, isYouTubeSource]);
+  }, [videoUrl, isExternalIframeSource, isYouTubeSource]);
 
   // Visualizer opacity: fade out as video fades in, fully gone when video is opaque
   const vizOpacity = hasActive ? Math.max(0, 1 - screenOpacity * 1.5) : 1;
@@ -214,7 +372,11 @@ const CinematicScreen = memo(
         {showVideo && (
           <div
             className="absolute inset-0 z-[4] flex items-center justify-center transition-opacity duration-300"
-            style={{ opacity: hasActive ? screenOpacity : 0, pointerEvents: hasActive ? "auto" : "none" }}
+            style={{
+              opacity: hasActive ? screenOpacity : 0,
+              filter: `brightness(${hasActive ? screenBrightness : 0})`,
+              pointerEvents: hasActive ? "auto" : "none",
+            }}
           >
             <div
               className="relative w-[78%] max-h-[85%] rounded-sm overflow-hidden"
@@ -224,7 +386,7 @@ const CinematicScreen = memo(
                 boxShadow: "0 8px 40px hsl(0 0% 0% / 0.7), 0 2px 12px hsl(0 0% 0% / 0.5)",
               }}
             >
-              {isYouTubeSource ? (
+              {isExternalIframeSource ? (
                 <iframe
                   ref={iframeRef}
                   src={embedUrl}
@@ -235,11 +397,18 @@ const CinematicScreen = memo(
                 />
               ) : (
                 <video
-                  ref={videoRef}
+                  ref={setVideoElement}
                   src={videoUrl}
                   className="w-full h-full object-cover"
+                  crossOrigin="anonymous"
                   playsInline
                   preload="metadata"
+                  onPlay={(e) => onMasterMediaEvent?.("play", e.currentTarget.currentTime)}
+                  onPause={(e) => onMasterMediaEvent?.("pause", e.currentTarget.currentTime)}
+                  onSeeking={(e) => onMasterMediaEvent?.("seeking", e.currentTarget.currentTime)}
+                  onSeeked={(e) => onMasterMediaEvent?.("seeked", e.currentTarget.currentTime)}
+                  onWaiting={(e) => onMasterMediaEvent?.("waiting", e.currentTarget.currentTime)}
+                  onCanPlay={(e) => onMasterMediaEvent?.("canplay", e.currentTarget.currentTime)}
                   onLoadedMetadata={(e) => {
                     const nextDuration = Number.isFinite(e.currentTarget.duration) ? e.currentTarget.duration : 0;
                     setDuration(nextDuration);
@@ -247,6 +416,7 @@ const CinematicScreen = memo(
                   onTimeUpdate={(e) => {
                     const d = e.currentTarget.duration;
                     const t = e.currentTarget.currentTime;
+                    onMasterMediaEvent?.("time", t);
                     if (Number.isFinite(d) && d > 0) {
                       setDuration(d);
                       setProgress(t / d);
@@ -256,6 +426,19 @@ const CinematicScreen = memo(
                 />
               )}
             </div>
+          </div>
+        )}
+
+        {!showVideo && showBlankWhenNoVideo && (
+          <div className="absolute inset-0 z-[4] flex items-center justify-center pointer-events-none">
+            <div
+              className="relative w-[78%] max-h-[85%] rounded-sm"
+              style={{
+                aspectRatio: "16 / 9",
+                background: "hsl(0 0% 0%)",
+                opacity: hasActive ? screenOpacity : 0,
+              }}
+            />
           </div>
         )}
 

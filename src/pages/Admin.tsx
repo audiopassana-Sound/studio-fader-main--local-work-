@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
 import { Trash2, Pencil, Plus, LogOut, Upload, X } from "lucide-react";
-import type { Session } from "@supabase/supabase-js";
+import type { PostgrestError, Session } from "@supabase/supabase-js";
+
+interface StemPayload {
+  name?: string;
+  url: string;
+}
+
+interface StemRowInput {
+  id: string;
+  name: string;
+  file: File | null;
+  existingUrl: string | null;
+}
 
 interface ProjectRow {
   id: string;
@@ -22,28 +34,31 @@ interface ProjectRow {
   stem_2_url: string | null;
   stem_3_url: string | null;
   stem_4_url: string | null;
+  stem_1_name: string | null;
+  stem_2_name: string | null;
+  stem_3_name: string | null;
+  stem_4_name: string | null;
+  stems?: StemPayload[] | null;
   created_at: string;
 }
 
 const EMPTY_FORM = {
   title: "",
   client: "",
-  category: "post" as string,
+  category: "post-production" as "post-production" | "recording",
   video_url: "",
   description: "",
-  stem_1_name: "",
-  stem_2_name: "",
-  stem_3_name: "",
-  stem_4_name: "",
 };
 
-type AudioFiles = {
-  audio_mix: File | null;
-  stem_1: File | null;
-  stem_2: File | null;
-  stem_3: File | null;
-  stem_4: File | null;
-};
+const AUDIO_BUCKET = "audio_files";
+const VIDEO_BUCKET = "video_files";
+
+const createStemRow = (name = ""): StemRowInput => ({
+  id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  name,
+  file: null,
+  existingUrl: null,
+});
 
 const Admin = () => {
   const navigate = useNavigate();
@@ -52,14 +67,9 @@ const Admin = () => {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
-  const [audioFiles, setAudioFiles] = useState<AudioFiles>({
-    audio_mix: null,
-    stem_1: null,
-    stem_2: null,
-    stem_3: null,
-    stem_4: null,
-  });
+  const [audioMixFile, setAudioMixFile] = useState<File | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [stems, setStems] = useState<StemRowInput[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -76,7 +86,7 @@ const Admin = () => {
     if (error) {
       toast.error("Failed to load projects");
     } else {
-      setProjects(data || []);
+      setProjects((data || []) as ProjectRow[]);
     }
     setLoading(false);
   }, []);
@@ -85,57 +95,66 @@ const Admin = () => {
     if (session) fetchProjects();
   }, [session, fetchProjects]);
 
-  const uploadFile = async (file: File, folder: string, bucket = "audio_files"): Promise<string | null> => {
+  const uploadFile = async (file: File, folder: string, bucketName: string = AUDIO_BUCKET): Promise<string | null> => {
     const ext = file.name.split(".").pop();
     const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+    const contentType = file.type || (bucketName === VIDEO_BUCKET ? "video/mp4" : "audio/mpeg");
 
-    const contentType =
-      file.type ||
-      (bucket === "audio_files" ? "video/mp4" : "audio/mpeg");
-
-      const { error } = await supabase.storage.from(bucket).upload(path, file, {
+    const { error } = await supabase.storage.from(bucketName).upload(path, file, {
       contentType,
       cacheControl: "3600",
       upsert: false,
     });
-
     if (error) {
-      console.error("Upload error details:", error);
       toast.error(`Upload failed for ${file.name}: ${error.message}`);
       return null;
     }
 
-    const { data } = supabase.storage.from(bucket).getPublicUrl(path)
-    if (!data.publicUrl) {
-      toast.error(`Failed to get public URL for ${file.name}`);
-      return null;
-    }
-
-    return data.publicUrl;
+    const { data } = supabase.storage.from(bucketName).getPublicUrl(path);
+    return data.publicUrl || null;
   };
+
+  const normalizedProjectStems = useCallback((p: ProjectRow): StemPayload[] => {
+    if (Array.isArray((p as any).stems)) {
+      return ((p as any).stems as StemPayload[]).filter((s) => !!s?.url);
+    }
+    return [
+      { name: p.stem_1_name || undefined, url: p.stem_1_url || "" },
+      { name: p.stem_2_name || undefined, url: p.stem_2_url || "" },
+      { name: p.stem_3_name || undefined, url: p.stem_3_url || "" },
+      { name: p.stem_4_name || undefined, url: p.stem_4_url || "" },
+    ].filter((s) => !!s.url);
+  }, []);
 
   const resetForm = () => {
     setForm(EMPTY_FORM);
-    setAudioFiles({ audio_mix: null, stem_1: null, stem_2: null, stem_3: null, stem_4: null });
+    setAudioMixFile(null);
     setVideoFile(null);
+    setStems([]);
     setEditingId(null);
     setShowForm(false);
   };
 
   const startEdit = (p: ProjectRow) => {
+    const normalizedCategory: "post-production" | "recording" =
+      p.category === "post" || p.category === "post-production" ? "post-production" : "recording";
     setForm({
       title: p.title,
       client: p.client || "",
-      category: p.category,
+      category: normalizedCategory,
       video_url: p.video_url || "",
       description: p.description || "",
-      stem_1_name: (p as any).stem_1_name || "",
-      stem_2_name: (p as any).stem_2_name || "",
-      stem_3_name: (p as any).stem_3_name || "",
-      stem_4_name: (p as any).stem_4_name || "",
     });
-    setAudioFiles({ audio_mix: null, stem_1: null, stem_2: null, stem_3: null, stem_4: null });
+    setAudioMixFile(null);
     setVideoFile(null);
+    setStems(
+      normalizedProjectStems(p).map((s) => ({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: s.name || "",
+        file: null,
+        existingUrl: s.url,
+      }))
+    );
     setEditingId(p.id);
     setShowForm(true);
   };
@@ -151,150 +170,77 @@ const Admin = () => {
     fetchProjects();
   };
 
-  const FileInput = ({ label, fileKey }: { label: string; fileKey: keyof AudioFiles }) => (
-    <div className="space-y-1">
-      <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{label}</label>
-      <div className="flex items-center gap-2">
-        <label className="flex items-center gap-2 px-3 py-2 rounded-md border border-input bg-secondary/50 cursor-pointer hover:bg-secondary transition-colors text-sm">
-          <Upload className="w-4 h-4 text-muted-foreground" />
-          <span className="text-foreground/80">{audioFiles[fileKey]?.name || "Choose file"}</span>
-          <input
-            type="file"
-            accept="audio/*"
-            className="hidden"
-            onChange={(e) => setAudioFiles((prev) => ({ ...prev, [fileKey]: e.target.files?.[0] || null }))}
-          />
-        </label>
-        {audioFiles[fileKey] && (
-          <button
-            type="button"
-            onClick={() => setAudioFiles((prev) => ({ ...prev, [fileKey]: null }))}
-            className="text-muted-foreground hover:text-destructive"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
-      </div>
-    </div>
-  );
-
-  const VideoFileInput = () => (
-    <div className="space-y-1">
-      <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Upload Video File</label>
-      <div className="flex items-center gap-2">
-        <label className="flex items-center gap-2 px-3 py-2 rounded-md border border-input bg-secondary/50 cursor-pointer hover:bg-secondary transition-colors text-sm">
-          <Upload className="w-4 h-4 text-muted-foreground" />
-          <span className="text-foreground/80">{videoFile?.name || "Choose file"}</span>
-          <input
-            type="file"
-            accept="video/*"
-            className="hidden"
-            onChange={(e) => setVideoFile(e.target.files?.[0] || null)}
-          />
-        </label>
-        {videoFile && (
-          <button
-            type="button"
-            onClick={() => setVideoFile(null)}
-            className="text-muted-foreground hover:text-destructive"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Uploading stores a public URL into <code className="text-foreground/80">video_url</code> (bucket:{" "}
-        <code className="text-foreground/80">video_files</code>).
-      </p>
-    </div>
-  );
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title.trim() || !form.category) {
       toast.error("Title and category are required");
       return;
     }
-
     setSubmitting(true);
 
     try {
-      const urls: Record<string, string | null> = {
-        audio_mix_url: null,
-        stem_1_url: null,
-        stem_2_url: null,
-        stem_3_url: null,
-        stem_4_url: null,
-      };
-
-      const uploadKeys: { key: keyof AudioFiles; urlKey: string }[] = [
-        { key: "audio_mix", urlKey: "audio_mix_url" },
-        { key: "stem_1", urlKey: "stem_1_url" },
-        { key: "stem_2", urlKey: "stem_2_url" },
-        { key: "stem_3", urlKey: "stem_3_url" },
-        { key: "stem_4", urlKey: "stem_4_url" },
-      ];
-
-      for (const { key, urlKey } of uploadKeys) {
-        const file = audioFiles[key];
-        if (!file) continue;
-        const url = await uploadFile(file, key, "audio_files");
-        if (!url) {
-          setSubmitting(false);
-          return;
-        }
-        urls[urlKey] = url;
+      let mixUrl: string | null = null;
+      if (audioMixFile) {
+        mixUrl = await uploadFile(audioMixFile, "audio_mix", AUDIO_BUCKET);
+        if (!mixUrl) throw new Error("Failed to upload audio mix");
       }
 
-      // Video upload (bucket: video_files). If provided, overrides the Video URL field.
       let uploadedVideoUrl: string | null = null;
       if (videoFile) {
-        const url = await uploadFile(videoFile, "video", "audio_files");
-        if (!url) {
-          toast.error(
-            "Video upload failed. Make sure a Supabase Storage bucket named 'video_files' exists and is configured for uploads + public access."
-          );
-          setSubmitting(false);
-          return;
-        }
-        uploadedVideoUrl = url;
+        uploadedVideoUrl = await uploadFile(videoFile, "video", VIDEO_BUCKET);
+        if (!uploadedVideoUrl) throw new Error("Failed to upload video");
       }
 
-      const record = {
+      const stemPayload: StemPayload[] = [];
+      for (let i = 0; i < stems.length; i++) {
+        const stem = stems[i];
+        let url = stem.existingUrl || null;
+        if (stem.file) {
+          url = await uploadFile(stem.file, `stem_${i + 1}`, AUDIO_BUCKET);
+        }
+        if (url) {
+          stemPayload.push({
+            name: stem.name.trim() || undefined,
+            url,
+          });
+        }
+      }
+
+      const legacy = {
+        stem_1_url: stemPayload[0]?.url || null,
+        stem_2_url: stemPayload[1]?.url || null,
+        stem_3_url: stemPayload[2]?.url || null,
+        stem_4_url: stemPayload[3]?.url || null,
+        stem_1_name: stemPayload[0]?.name || null,
+        stem_2_name: stemPayload[1]?.name || null,
+        stem_3_name: stemPayload[2]?.name || null,
+        stem_4_name: stemPayload[3]?.name || null,
+      };
+
+      const record: Record<string, unknown> = {
         title: form.title.trim(),
         client: form.client.trim() || null,
-        category: form.category === "post" ? "post-production" : "recording",
+        category: form.category,
         video_url: uploadedVideoUrl || form.video_url.trim() || null,
         description: form.description.trim() || null,
-        stem_1_name: form.stem_1_name.trim() || null,
-        stem_2_name: form.stem_2_name.trim() || null,
-        stem_3_name: form.stem_3_name.trim() || null,
-        stem_4_name: form.stem_4_name.trim() || null,
-        ...urls,
+        stems: stemPayload,
+        ...legacy,
       };
 
       if (editingId) {
-        const updateData: Record<string, unknown> = {
-          title: record.title,
-          client: record.client,
-          category: record.category,
-          video_url: record.video_url,
-          description: record.description,
-          stem_1_name: record.stem_1_name,
-          stem_2_name: record.stem_2_name,
-          stem_3_name: record.stem_3_name,
-          stem_4_name: record.stem_4_name,
-        };
-
-        for (const { key, urlKey } of uploadKeys) {
-          if (audioFiles[key]) updateData[urlKey] = urls[urlKey];
+        if (!mixUrl) {
+          const existing = projects.find((p) => p.id === editingId);
+          record.audio_mix_url = existing?.audio_mix_url || null;
+        } else {
+          record.audio_mix_url = mixUrl;
         }
 
-        const { error } = await supabase.from("projects").update(updateData).eq("id", editingId);
+        const { error } = await supabase.from("projects").update(record as any).eq("id", editingId);
         if (error) throw error;
         toast.success("Project updated successfully");
       } else {
-        const { error } = await supabase.from("projects").insert(record);
+        record.audio_mix_url = mixUrl;
+        const { error } = await supabase.from("projects").insert(record as any);
         if (error) throw error;
         toast.success("Project created successfully");
       }
@@ -303,11 +249,17 @@ const Admin = () => {
       fetchProjects();
     } catch (err) {
       console.error("Admin save error:", err);
-      toast.error(err instanceof Error ? err.message : "Save failed");
+      const e2 = err as Partial<PostgrestError> & { message?: string };
+      const details = [e2.message, e2.details, e2.hint].filter(Boolean).join(" | ");
+      toast.error(details || "Save failed");
     } finally {
       setSubmitting(false);
     }
   };
+
+  const stemCountLabel = useMemo(() => {
+    return (p: ProjectRow) => normalizedProjectStems(p).length;
+  }, [normalizedProjectStems]);
 
   if (!session) {
     return (
@@ -324,7 +276,6 @@ const Admin = () => {
   return (
     <div className="min-h-screen bg-background text-foreground p-4 md:p-8">
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Project Manager</h1>
           <div className="flex gap-2">
@@ -346,7 +297,6 @@ const Admin = () => {
           </div>
         </div>
 
-        {/* Form */}
         {showForm && (
           <form onSubmit={handleSubmit} className="p-6 rounded-lg border border-border bg-card space-y-4">
             <div className="flex items-center justify-between">
@@ -367,11 +317,11 @@ const Admin = () => {
               </div>
               <div className="space-y-1">
                 <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Category *</label>
-                <Select value={form.category} onValueChange={(v) => setForm((f) => ({ ...f, category: v }))}>
+                <Select value={form.category} onValueChange={(v: "post-production" | "recording") => setForm((f) => ({ ...f, category: v }))}>
                   <SelectTrigger className="bg-secondary/50"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                  <SelectItem value="post-production">Post Production</SelectItem>
-                  <SelectItem value="recording">Recordings &amp; Mixes</SelectItem>
+                    <SelectItem value="post-production">Post Production</SelectItem>
+                    <SelectItem value="recording">Recordings &amp; Mixes</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -385,7 +335,21 @@ const Admin = () => {
                     className="bg-secondary/50"
                   />
                 </div>
-                <VideoFileInput />
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Upload Video File</label>
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-2 px-3 py-2 rounded-md border border-input bg-secondary/50 cursor-pointer hover:bg-secondary transition-colors text-sm">
+                      <Upload className="w-4 h-4 text-muted-foreground" />
+                      <span className="text-foreground/80">{videoFile?.name || "Choose file"}</span>
+                      <input type="file" accept="video/*" className="hidden" onChange={(e) => setVideoFile(e.target.files?.[0] || null)} />
+                    </label>
+                    {videoFile && (
+                      <button type="button" onClick={() => setVideoFile(null)} className="text-muted-foreground hover:text-destructive">
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -394,45 +358,93 @@ const Admin = () => {
               <Textarea value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} rows={3} className="bg-secondary/50" />
             </div>
 
-            <div className="space-y-4">
-              <FileInput label="Audio Mix" fileKey="audio_mix" />
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <FileInput label="Stem 1" fileKey="stem_1" />
-                <div className="space-y-1">
-                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Stem 1 Name</label>
-                  <Input value={form.stem_1_name} onChange={(e) => setForm((f) => ({ ...f, stem_1_name: e.target.value }))} placeholder="e.g., Vocals" className="bg-secondary/50" />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <FileInput label="Stem 2" fileKey="stem_2" />
-                <div className="space-y-1">
-                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Stem 2 Name</label>
-                  <Input value={form.stem_2_name} onChange={(e) => setForm((f) => ({ ...f, stem_2_name: e.target.value }))} placeholder="e.g., Drums" className="bg-secondary/50" />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <FileInput label="Stem 3" fileKey="stem_3" />
-                <div className="space-y-1">
-                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Stem 3 Name</label>
-                  <Input value={form.stem_3_name} onChange={(e) => setForm((f) => ({ ...f, stem_3_name: e.target.value }))} placeholder="e.g., Bass" className="bg-secondary/50" />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <FileInput label="Stem 4" fileKey="stem_4" />
-                <div className="space-y-1">
-                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Stem 4 Name</label>
-                  <Input value={form.stem_4_name} onChange={(e) => setForm((f) => ({ ...f, stem_4_name: e.target.value }))} placeholder="e.g., Guitar" className="bg-secondary/50" />
-                </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Audio Mix</label>
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-2 px-3 py-2 rounded-md border border-input bg-secondary/50 cursor-pointer hover:bg-secondary transition-colors text-sm">
+                  <Upload className="w-4 h-4 text-muted-foreground" />
+                  <span className="text-foreground/80">{audioMixFile?.name || "Choose file"}</span>
+                  <input type="file" accept="audio/*" className="hidden" onChange={(e) => setAudioMixFile(e.target.files?.[0] || null)} />
+                </label>
+                {audioMixFile && (
+                  <button type="button" onClick={() => setAudioMixFile(null)} className="text-muted-foreground hover:text-destructive">
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
             </div>
 
-            {editingId && (
-              <p className="text-xs text-muted-foreground">Only re-upload files you want to replace. Existing files are kept otherwise.</p>
-            )}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Stem Channels</label>
+                <Button type="button" variant="outline" size="sm" onClick={() => setStems((prev) => [...prev, createStemRow()])}>
+                  <Plus className="w-4 h-4 mr-1" /> Add Stem Channel
+                </Button>
+              </div>
+
+              {stems.length === 0 ? (
+                <p className="text-xs text-muted-foreground">No stems added yet.</p>
+              ) : (
+                stems.map((stem, idx) => (
+                  <div key={stem.id} className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-3 p-3 rounded border border-border">
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Stem Name</label>
+                      <Input
+                        value={stem.name}
+                        onChange={(e) =>
+                          setStems((prev) => prev.map((s) => (s.id === stem.id ? { ...s, name: e.target.value } : s)))
+                        }
+                        placeholder={`Stem ${idx + 1}`}
+                        className="bg-secondary/50"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Audio File</label>
+                      <div className="flex items-center gap-2">
+                        <label className="flex items-center gap-2 px-3 py-2 rounded-md border border-input bg-secondary/50 cursor-pointer hover:bg-secondary transition-colors text-sm">
+                          <Upload className="w-4 h-4 text-muted-foreground" />
+                          <span className="text-foreground/80">{stem.file?.name || (stem.existingUrl ? "Using existing file" : "Choose file")}</span>
+                          <input
+                            type="file"
+                            accept="audio/*"
+                            className="hidden"
+                            onChange={(e) =>
+                              setStems((prev) =>
+                                prev.map((s) => (s.id === stem.id ? { ...s, file: e.target.files?.[0] || null } : s))
+                              )
+                            }
+                          />
+                        </label>
+                        {(stem.file || stem.existingUrl) && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setStems((prev) =>
+                                prev.map((s) => (s.id === stem.id ? { ...s, file: null, existingUrl: null } : s))
+                              )
+                            }
+                            className="text-muted-foreground hover:text-destructive"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-end">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => setStems((prev) => prev.filter((s) => s.id !== stem.id))}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
 
             <div className="flex gap-2 pt-2">
               <Button type="submit" disabled={submitting}>
@@ -443,7 +455,6 @@ const Admin = () => {
           </form>
         )}
 
-        {/* Projects list */}
         {loading ? (
           <p className="text-muted-foreground text-center py-12">Loading…</p>
         ) : projects.length === 0 ? (
@@ -457,7 +468,7 @@ const Admin = () => {
                   <TableHead>Client</TableHead>
                   <TableHead>Category</TableHead>
                   <TableHead>Video</TableHead>
-                  <TableHead>Audio</TableHead>
+                  <TableHead>Stems</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -466,11 +477,11 @@ const Admin = () => {
                   <TableRow key={p.id}>
                     <TableCell className="font-medium">{p.title}</TableCell>
                     <TableCell>{p.client || "—"}</TableCell>
-                    <TableCell className="capitalize">{p.category === "post" ? "Post Production" : "Recordings"}</TableCell>
-                    <TableCell>{p.video_url ? "✓" : "—"}</TableCell>
-                    <TableCell>
-                      {[p.audio_mix_url, p.stem_1_url, p.stem_2_url, p.stem_3_url, p.stem_4_url].filter(Boolean).length}/5
+                    <TableCell className="capitalize">
+                      {p.category === "post" || p.category === "post-production" ? "Post Production" : "Recordings"}
                     </TableCell>
+                    <TableCell>{p.video_url ? "✓" : "—"}</TableCell>
+                    <TableCell>{stemCountLabel(p)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
                         <Button variant="ghost" size="sm" onClick={() => startEdit(p)}>

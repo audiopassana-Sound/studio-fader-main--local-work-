@@ -9,14 +9,7 @@ export interface Project {
   category: Category;
   videoUrl?: string;
   audioMixUrl?: string;
-  stem1Url?: string;
-  stem2Url?: string;
-  stem3Url?: string;
-  stem4Url?: string;
-  stem1Name?: string;
-  stem2Name?: string;
-  stem3Name?: string;
-  stem4Name?: string;
+  stems: { name?: string; url: string }[];
   client?: string;
   description?: string;
 }
@@ -40,23 +33,38 @@ export function useProjects() {
         return;
       }
 
-      const mapped: Project[] = (data || []).map((row) => ({
+      const mapped: Project[] = (data || []).map((row) => {
+        const dynamicStemsRaw = Array.isArray((row as any).stems) ? (row as any).stems : [];
+        const dynamicStems = dynamicStemsRaw
+          .map((s: any) => ({
+            name: typeof s?.name === "string" ? s.name : undefined,
+            url: typeof s?.url === "string" ? s.url : "",
+          }))
+          .filter((s: { url: string }) => !!s.url);
+
+        const legacyStems = [
+          { name: (row as any).stem_1_name || undefined, url: row.stem_1_url || "" },
+          { name: (row as any).stem_2_name || undefined, url: row.stem_2_url || "" },
+          { name: (row as any).stem_3_name || undefined, url: row.stem_3_url || "" },
+          { name: (row as any).stem_4_name || undefined, url: row.stem_4_url || "" },
+        ].filter((s) => !!s.url);
+
+        return {
+        // DB may store either "post"/"recordings" or "post-production"/"recording".
+        // Normalize into the app's internal Category union.
         id: row.id,
         name: row.title,
-        category: row.category as Category,
+        category:
+          row.category === "post-production" || row.category === "post"
+            ? "post"
+            : "recordings",
         videoUrl: row.video_url || undefined,
         audioMixUrl: row.audio_mix_url || undefined,
-        stem1Url: row.stem_1_url || undefined,
-        stem2Url: row.stem_2_url || undefined,
-        stem3Url: row.stem_3_url || undefined,
-        stem4Url: row.stem_4_url || undefined,
-        stem1Name: (row as any).stem_1_name || undefined,
-        stem2Name: (row as any).stem_2_name || undefined,
-        stem3Name: (row as any).stem_3_name || undefined,
-        stem4Name: (row as any).stem_4_name || undefined,
+        stems: dynamicStems.length > 0 ? dynamicStems : legacyStems,
         client: row.client || undefined,
         description: row.description || undefined,
-      }));
+      };
+      });
 
       setAllProjects(mapped);
     };
