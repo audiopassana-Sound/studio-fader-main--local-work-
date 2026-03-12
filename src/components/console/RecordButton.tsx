@@ -8,21 +8,23 @@ interface RecordButtonProps {
 
 const RecordButton = memo(({ isPlaying, onBeforeNavigate }: RecordButtonProps) => {
   const navigate = useNavigate();
-  const [fading, setFading] = useState(false);
+  const [isZooming, setIsZooming] = useState(false);
 
-  const handleClick = useCallback(() => {
+  const handleTransition = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
+    e.preventDefault();
+    if (isZooming) return;
     onBeforeNavigate?.();
-    setFading(true);
+    setIsZooming(true);
     setTimeout(() => {
       navigate("/portfolio");
-    }, 800);
-  }, [navigate, onBeforeNavigate]);
+    }, 700);
+  }, [isZooming, navigate, onBeforeNavigate]);
 
   return (
     <>
       {/* The record button */}
       <button
-        onClick={handleClick}
+        onClick={handleTransition}
         className="group relative flex items-center gap-3 px-7 py-3 rounded-full transition-all duration-300 pointer-events-auto z-[130]
           appearance-none border-none shadow-none focus:shadow-none
           bg-transparent !bg-opacity-0 hover:bg-transparent active:bg-transparent
@@ -54,6 +56,11 @@ const RecordButton = memo(({ isPlaying, onBeforeNavigate }: RecordButtonProps) =
           PRESS RECORD
         </span>
       </button>
+      <div
+        className={`fixed top-1/2 left-1/2 w-4 h-4 bg-black rounded-full z-[9999] pointer-events-none transition-transform duration-700 ease-in-out origin-center -translate-x-1/2 -translate-y-1/2 ${
+          isZooming ? "scale-[200]" : "scale-0"
+        }`}
+      />
     </>
   );
 });

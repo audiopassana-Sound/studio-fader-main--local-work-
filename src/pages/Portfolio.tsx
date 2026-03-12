@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Play, ExternalLink, Mail, Linkedin } from "lucide-react";
+import { ArrowLeft, ExternalLink, Mail, Linkedin, Pause } from "lucide-react";
 import WaveformHero from "@/components/portfolio/WaveformHero";
 import ScrollReveal from "@/components/portfolio/ScrollReveal";
 import { supabase } from "@/integrations/supabase/client";
@@ -21,20 +21,20 @@ const SERVICES = [
   { title: "Post Production", desc: "Complete audio post-production pipeline." },
 ];
 
-function extractYouTubeId(url: string): string | null {
-  const m = url.match(/(?:embed\/|v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
-  return m ? m[1] : null;
-}
+const SAMPLE_VIDEO_URL = "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
 const Portfolio = () => {
   const navigate = useNavigate();
+  const [isVisible, setIsVisible] = useState(false);
   const [entered, setEntered] = useState(false);
   const [exiting, setExiting] = useState(false);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
 
   useEffect(() => {
     requestAnimationFrame(() => setEntered(true));
+    requestAnimationFrame(() => setIsVisible(true));
 
     const load = async () => {
       setLoading(true);
@@ -60,6 +60,40 @@ const Portfolio = () => {
     setTimeout(() => navigate("/"), 600);
   }, [navigate]);
 
+  const getVideoUrl = useCallback((raw: string | null): string => {
+    if (!raw) return SAMPLE_VIDEO_URL;
+    const trimmed = raw.trim();
+    if (!trimmed) return SAMPLE_VIDEO_URL;
+    const isDirectVideo = /\.(mp4|webm|ogg)(\?.*)?$/i.test(trimmed) || /\/storage\/v1\/object\/public\//i.test(trimmed);
+    return isDirectVideo ? trimmed : SAMPLE_VIDEO_URL;
+  }, []);
+
+  const handleSeekAndPlay = useCallback((projectId: string, e: React.MouseEvent<HTMLVideoElement>) => {
+    const target = e.currentTarget;
+    const percentage = e.nativeEvent.offsetX / target.clientWidth;
+
+    Object.entries(videoRefs.current).forEach(([id, video]) => {
+      if (!video || id === projectId) return;
+      video.pause();
+    });
+
+    if (Number.isFinite(target.duration) && target.duration > 0) {
+      target.currentTime = Math.max(0, Math.min(1, percentage)) * target.duration;
+    }
+
+    target.muted = false;
+    target.volume = 1;
+    void target.play().catch(() => {
+      // Ignore blocked play attempts; user can click again.
+    });
+  }, []);
+
+  const handleSelectedWorkWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (!e.shiftKey) return;
+    e.preventDefault();
+    e.currentTarget.scrollLeft += e.deltaY;
+  }, []);
+
   return (
     <>
       <div
@@ -67,7 +101,7 @@ const Portfolio = () => {
         style={{ opacity: entered && !exiting ? 0 : 1 }}
       />
 
-      <div className="min-h-screen bg-background text-foreground overflow-x-hidden">
+      <div className={`min-h-screen bg-background text-foreground overflow-x-hidden transition-opacity duration-700 ease-in-out ${isVisible ? "opacity-100" : "opacity-0"}`}>
         {/* Navigation */}
         <nav className="fixed top-0 left-0 right-0 z-50 px-6 py-4 flex items-center justify-between bg-background/80 backdrop-blur-md border-b border-border/50">
           <button
@@ -100,21 +134,23 @@ const Portfolio = () => {
             <ScrollReveal delay={150}>
               <p className="text-xl md:text-2xl lg:text-3xl font-semibold text-foreground mt-2 tracking-wide uppercase">YANIV PAZ</p>
             </ScrollReveal>
-            <ScrollReveal delay={300}>
-              <p className="text-muted-foreground text-sm md:text-base max-w-lg mt-6 leading-relaxed">
-                Award-winning sound designer crafting immersive audio experiences for film, television, and advertising.
-              </p>
-            </ScrollReveal>
-            <ScrollReveal delay={450}>
-              <div className="flex gap-4 mt-8">
-                <a href="#projects" className="px-6 py-3 text-sm font-semibold tracking-wider uppercase rounded transition-all duration-300 hover:scale-105 hover:shadow-lg" style={{ background: "hsl(180, 100%, 50%)", color: "hsl(0, 0%, 0%)" }}>
-                  View Work
-                </a>
-                <a href="mailto:contact@yanivpaz.com" className="px-6 py-3 text-sm font-semibold tracking-wider uppercase rounded border border-foreground/20 text-foreground/80 transition-all duration-300 hover:border-foreground/50 hover:text-foreground hover:scale-105">
-                  Get in Touch
-                </a>
-              </div>
-            </ScrollReveal>
+            <div className="mt-[15%]">
+              <ScrollReveal delay={300}>
+                <p className="text-muted-foreground text-sm md:text-base max-w-lg mt-6 leading-relaxed">
+                  Award-winning sound designer crafting immersive audio experiences for film, television, and advertising.
+                </p>
+              </ScrollReveal>
+              <ScrollReveal delay={450}>
+                <div className="flex gap-4 mt-8">
+                  <a href="#projects" className="px-6 py-3 text-sm font-semibold tracking-wider uppercase rounded transition-all duration-300 hover:scale-105 hover:shadow-lg" style={{ background: "hsl(180, 100%, 50%)", color: "hsl(0, 0%, 0%)" }}>
+                    View Work
+                  </a>
+                  <a href="mailto:contact@yanivpaz.com" className="px-6 py-3 text-sm font-semibold tracking-wider uppercase rounded border border-foreground/20 text-foreground/80 transition-all duration-300 hover:border-foreground/50 hover:text-foreground hover:scale-105">
+                    Get in Touch
+                  </a>
+                </div>
+              </ScrollReveal>
+            </div>
           </div>
         </section>
 
@@ -130,29 +166,38 @@ const Portfolio = () => {
           ) : projects.length === 0 ? (
             <p className="text-muted-foreground text-center py-12">No projects yet.</p>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 lg:gap-8">
+            <div
+              className="flex gap-6 overflow-x-auto pb-8 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+              onWheel={handleSelectedWorkWheel}
+            >
               {projects.map((project, i) => {
-                const ytId = project.video_url ? extractYouTubeId(project.video_url) : null;
-                const thumbnail = ytId ? `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg` : null;
+                const videoUrl = getVideoUrl(project.video_url);
 
                 return (
                   <ScrollReveal key={project.id} delay={i * 120}>
-                    <div className="group relative rounded-lg overflow-hidden border border-border/50 bg-card transition-all duration-300 hover:border-border hover:shadow-[0_8px_30px_hsl(0_0%_0%/0.3)] hover:scale-[1.02]">
-                      <div className="relative aspect-video overflow-hidden" style={{ background: "hsl(0 0% 8%)" }}>
-                        {thumbnail ? (
-                          <img src={thumbnail} alt={project.title} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" loading="lazy" />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center">
-                            <div className="w-16 h-16 rounded-full border-2 border-muted-foreground/30 flex items-center justify-center">
-                              <Play className="w-6 h-6 text-muted-foreground/50 ml-1" />
-                            </div>
-                          </div>
-                        )}
-                        <div className="absolute inset-0 bg-background/60 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center">
-                          <div className="w-14 h-14 rounded-full flex items-center justify-center transition-transform duration-300 group-hover:scale-110" style={{ background: "hsl(180, 100%, 50%)" }}>
-                            <Play className="w-6 h-6 text-background ml-0.5" />
-                          </div>
-                        </div>
+                    <div className="group w-[22vw] min-w-[350px] max-w-[420px] flex-shrink-0">
+                      <div className="relative overflow-hidden rounded-lg border border-border/50 bg-card">
+                        <video
+                          ref={(el) => {
+                            videoRefs.current[project.id] = el;
+                          }}
+                          src={videoUrl}
+                          preload="metadata"
+                          playsInline
+                          className="w-full aspect-video object-cover cursor-pointer transition duration-200 group-hover:brightness-110"
+                          onClick={(e) => handleSeekAndPlay(project.id, e)}
+                        />
+                        <button
+                          type="button"
+                          className="absolute top-2 right-2 z-10 bg-black/60 text-white p-2 rounded-full cursor-pointer hover:bg-black/75 transition-colors"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            videoRefs.current[project.id]?.pause();
+                          }}
+                          aria-label={`Pause ${project.title}`}
+                        >
+                          <Pause className="w-4 h-4" />
+                        </button>
                       </div>
                       <div className="p-5">
                         <span className="text-xs font-mono-console tracking-wider uppercase text-muted-foreground">
