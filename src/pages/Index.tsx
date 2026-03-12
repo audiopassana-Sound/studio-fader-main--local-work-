@@ -270,8 +270,8 @@ const Index = () => {
 
   // Single source of truth for starting/stopping playback.
   // The TransportControls Play button uses the toggle; fader auto-play uses handlePlay().
-  const handlePlay = useCallback(async (forcedMode?: "mix" | "stems", forcedActiveAudioIndices?: number[]) => {
-    if (projects.isPlaying) return;
+  const handlePlay = useCallback(async (forcedMode?: "mix" | "stems", forcedActiveAudioIndices?: number[], forceStart = false) => {
+    if (projects.isPlaying && !forceStart) return;
     ensureAnalyserOnce();
     await audio.resumeAudio();
     const mode = forcedMode ?? getPlaybackModeFromLevels(channelsRef.current);
@@ -306,7 +306,9 @@ const Index = () => {
   }, [audio, projects.isPlaying, projects.stopPlay]);
 
   const handlePlayPause = useCallback(() => {
-    if (projects.isPlaying) {
+    void audio.resumeAudio();
+    const mediaActuallyPlaying = audio.isAnyMediaPlaying();
+    if (projects.isPlaying && mediaActuallyPlaying) {
       handlePause();
       return;
     }
@@ -326,13 +328,14 @@ const Index = () => {
         return next;
       });
       setActiveAudioMode("mix");
-      void handlePlay("mix", [0]);
+      void handlePlay("mix", [0], true);
       return;
     }
 
-    // Explicit Play should honor current fader levels and active source.
-    void handlePlay();
-  }, [handlePause, handlePlay, projects.isPlaying, masterIndex]);
+    // Explicit Play should honor current fader levels and force underlying media play
+    // even if React state drifted.
+    void handlePlay(undefined, undefined, true);
+  }, [audio, handlePause, handlePlay, projects.isPlaying, masterIndex]);
 
   useEffect(() => {
     handlePlayRef.current = handlePlay;
@@ -565,6 +568,11 @@ const Index = () => {
     audio.stopAll();
   }, [projects.stopPlay, audio]);
 
+  const handleVideoEnded = useCallback(() => {
+    projects.stopPlay();
+    audio.stopAll();
+  }, [projects.stopPlay, audio]);
+
   // Do not fall back to any hardcoded media URL; only use project URLs from Supabase.
   if (channels.length < 2) {
     return (
@@ -590,7 +598,7 @@ const Index = () => {
           videoUrl={effectiveVideoUrl}
           showBlankWhenNoVideo={mixUsesAudioFile}
           isPlaying={projects.isPlaying}
-          onVideoEnded={projects.stopPlay}
+          onVideoEnded={handleVideoEnded}
           onMasterMediaEvent={handleMasterMediaEvent}
           onMixMediaElementChange={handleMixMediaElementChange}
           mixMuted={activeAudioMode === "stems"}
