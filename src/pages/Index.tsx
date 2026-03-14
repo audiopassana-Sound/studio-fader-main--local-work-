@@ -54,6 +54,7 @@ const getInitialChannels = (project?: { stems?: { name?: string; url: string }[]
 ];
 
 const Index = () => {
+  const [reveal, setReveal] = useState(false);
   const projects = useProjects();
   const rawVideoUrl = projects.currentProject?.videoUrl?.trim() || "";
   const hasUploadedVideoFile = /\/storage\/v1\/object\/public\/video_files\//i.test(rawVideoUrl);
@@ -100,6 +101,10 @@ const Index = () => {
       audio.stopAll();
     };
   }, [projects.stopPlay, audio]);
+
+  useEffect(() => {
+    setReveal(true);
+  }, []);
 
   // Reset all faders and audio when category or project switches
   const prevCategory = useRef(projects.category);
@@ -576,14 +581,20 @@ const Index = () => {
   // Do not fall back to any hardcoded media URL; only use project URLs from Supabase.
   if (channels.length < 2) {
     return (
-      <div className="flex h-screen items-center justify-center bg-background text-muted-foreground">
+      <div className="flex h-screen items-center justify-center bg-black text-muted-foreground">
         Loading...
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-screen bg-background overflow-hidden select-none">
+    <div className="h-screen bg-black">
+      <div
+        className={`flex flex-col h-screen bg-background overflow-hidden select-none transition-opacity duration-1000 ${
+          reveal ? "opacity-100" : "opacity-0"
+        }`}
+      >
+
       {/* Record button — top center (must always be clickable and above overlays) */}
       <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[120] pointer-events-none">
         <RecordButton isPlaying={projects.isPlaying} onBeforeNavigate={handleBeforePortfolio} />
@@ -656,6 +667,7 @@ const Index = () => {
             onPanChange={(v) => handlePanChange(i, v)}
           />
         ))}
+      </div>
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { memo, useState, useCallback } from "react";
+import { memo, useState, useCallback, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 
 interface RecordButtonProps {
@@ -8,23 +8,33 @@ interface RecordButtonProps {
 
 const RecordButton = memo(({ isPlaying, onBeforeNavigate }: RecordButtonProps) => {
   const navigate = useNavigate();
-  const [isZooming, setIsZooming] = useState(false);
+  const [fading, setFading] = useState(false);
+  const navigateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const handleTransition = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
-    e.preventDefault();
-    if (isZooming) return;
+  useEffect(() => {
+    return () => {
+      if (navigateTimeoutRef.current) {
+        clearTimeout(navigateTimeoutRef.current);
+        navigateTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleClick = useCallback(() => {
+    if (fading) return;
     onBeforeNavigate?.();
-    setIsZooming(true);
-    setTimeout(() => {
-      navigate("/portfolio");
-    }, 700);
-  }, [isZooming, navigate, onBeforeNavigate]);
+    setFading(true);
+    navigateTimeoutRef.current = setTimeout(() => {
+      navigate("/");
+    }, 800);
+  }, [fading, navigate, onBeforeNavigate]);
 
   return (
     <>
       {/* The record button */}
       <button
-        onClick={handleTransition}
+        onClick={handleClick}
+        aria-disabled={fading}
         className="group relative flex items-center gap-3 px-7 py-3 rounded-full transition-all duration-300 pointer-events-auto z-[130]
           appearance-none border-none shadow-none focus:shadow-none
           bg-transparent !bg-opacity-0 hover:bg-transparent active:bg-transparent
@@ -32,7 +42,7 @@ const RecordButton = memo(({ isPlaying, onBeforeNavigate }: RecordButtonProps) =
           hover:shadow-[0_0_24px_hsl(0_85%_55%/0.25)]
           active:scale-95"
         style={{ WebkitTapHighlightColor: "transparent" }}
-        aria-label="Press Record — go to portfolio"
+        aria-label="Press Record — go to The Stage"
       >
         {/* Animated red border: pulses in sync with dot when NOT playing */}
         <span
@@ -56,11 +66,6 @@ const RecordButton = memo(({ isPlaying, onBeforeNavigate }: RecordButtonProps) =
           PRESS RECORD
         </span>
       </button>
-      <div
-        className={`fixed top-1/2 left-1/2 w-4 h-4 bg-black rounded-full z-[9999] pointer-events-none transition-transform duration-700 ease-in-out origin-center -translate-x-1/2 -translate-y-1/2 ${
-          isZooming ? "scale-[200]" : "scale-0"
-        }`}
-      />
     </>
   );
 });

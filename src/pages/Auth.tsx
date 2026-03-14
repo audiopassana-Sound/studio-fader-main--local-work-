@@ -8,7 +8,7 @@ import { toast } from "sonner";
 const Auth = () => {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const redirect = params.get("redirect") || "/admin";
+  const redirect = params.get("redirect") || "/office";
 
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");

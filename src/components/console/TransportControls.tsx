@@ -67,8 +67,6 @@ const TransportControls = memo(
         {/* Play/Pause */}
         <button
           onClick={() => {
-            // eslint-disable-next-line no-console
-            console.log("Play button clicked, current state:", isPlaying);
             onPlayPause();
           }}
           className={`relative w-12 h-10 rounded-sm flex items-center justify-center transition-all duration-100 active:scale-95 ${

@@ -60,7 +60,7 @@ const WaveformHero = memo(() => {
   return (
     <canvas
       ref={canvasRef}
-      className="absolute inset-0 w-full h-full"
+      className="absolute inset-0 -translate-y-16 md:-translate-y-20 lg:-translate-y-24 w-full h-full"
       style={{ opacity: 0.9 }}
     />
   );
