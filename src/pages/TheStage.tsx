@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Globe, Linkedin, Mail } from "lucide-react";
+import { ChevronLeft, ChevronRight, Globe, Linkedin, Mail, Pause, Play } from "lucide-react";
 import { FaFacebook, FaImdb, FaInstagram, FaXTwitter, FaYoutube } from "react-icons/fa6";
 import WaveformHero from "@/components/portfolio/WaveformHero";
 import ScrollReveal from "@/components/portfolio/ScrollReveal";
@@ -17,18 +17,45 @@ interface ProjectRow {
   description: string | null;
 }
 
-const SAMPLE_VIDEO_URL = "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+type MediaSource =
+  | { kind: "youtube"; embedUrl: string; previewUrl: string }
+  | { kind: "vimeo"; embedUrl: string }
+  | { kind: "video"; src: string };
+
+const parseYouTubeId = (url: string): string | null => {
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/,
+  ];
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+};
+
+const parseVimeoId = (url: string): string | null => {
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/vimeo\.com\/(?:video\/)?(\d+)/);
+  return match?.[1] || null;
+};
 
 const TheStage = () => {
   const navigate = useNavigate();
-  const { contact, customLinks, activeModules, heroContent, servicesContent, footerContent } = useSiteContext();
+  const { contact, customLinks, activeModules, heroContent, servicesContent, footerContent, mediaRouting } = useSiteContext();
   const [activeTab, setActiveTab] = useState("all");
   const [isPlayingStudioIntro, setIsPlayingStudioIntro] = useState(false);
   const [fadeToBlack, setFadeToBlack] = useState(false);
   const [isContactOpen, setIsContactOpen] = useState(false);
-  const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [projects, setProjects] = useState<ProjectRow[] | undefined>([]);
   const [loading, setLoading] = useState(true);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(true);
   const videoRefs = useRef<Record<string, HTMLVideoElement | null>>({});
+  const galleryScrollRef = useRef<HTMLDivElement | null>(null);
   const studioCutTriggeredRef = useRef(false);
   const studioNavigateTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -43,8 +70,7 @@ const TheStage = () => {
       setLoading(true);
       const { data, error } = await supabase
         .from("projects")
-        .select("id, title, client, category, video_url, description")
-        .order("created_at", { ascending: false });
+        .select("id, title, client, category, video_url, description");
 
       if (error) {
         console.error("Failed to load projects:", error);
@@ -66,31 +92,124 @@ const TheStage = () => {
     };
   }, []);
 
-  const getVideoUrl = useCallback((raw: string | null): string => {
-    if (!raw) return SAMPLE_VIDEO_URL;
+  const getMediaSource = useCallback((raw: string | null): MediaSource | null => {
+    if (!raw) return null;
     const trimmed = raw.trim();
-    if (!trimmed) return SAMPLE_VIDEO_URL;
-    const isDirectVideo = /\.(mp4|webm|ogg)(\?.*)?$/i.test(trimmed) || /\/storage\/v1\/object\/public\//i.test(trimmed);
-    return isDirectVideo ? trimmed : SAMPLE_VIDEO_URL;
+    if (!trimmed) return null;
+
+    const youTubeId = parseYouTubeId(trimmed);
+    if (youTubeId) {
+      return {
+        kind: "youtube",
+        embedUrl: `https://www.youtube.com/embed/${youTubeId}?enablejsapi=1&playsinline=1&rel=0`,
+        previewUrl: `https://img.youtube.com/vi/${youTubeId}/hqdefault.jpg`,
+      };
+    }
+
+    const vimeoId = parseVimeoId(trimmed);
+    if (vimeoId) {
+      return {
+        kind: "vimeo",
+        embedUrl: `https://player.vimeo.com/video/${vimeoId}?playsinline=1`,
+      };
+    }
+
+    return { kind: "video", src: trimmed };
   }, []);
 
-  const handleSeekAndPlay = useCallback((projectId: string, e: React.MouseEvent<HTMLVideoElement>) => {
-    const target = e.currentTarget;
-    const percentage = e.nativeEvent.offsetX / target.clientWidth;
+  const pauseAllEmbeddedExcept = useCallback((projectId: string) => {
+    Object.entries(iframeRefs.current).forEach(([id, frame]) => {
+      if (!frame || id === projectId) return;
+      frame.contentWindow?.postMessage(
+        JSON.stringify({ event: "command", func: "pauseVideo", args: [] }),
+        "*"
+      );
+      frame.contentWindow?.postMessage({ method: "pause" }, "*");
+    });
+  }, []);
+
+  const [embeddedPlayback, setEmbeddedPlayback] = useState<Record<string, boolean>>({});
+  const iframeRefs = useRef<Record<string, HTMLIFrameElement | null>>({});
+
+  const handleDirectVideoToggle = useCallback((projectId: string) => {
+    const target = videoRefs.current[projectId];
+    if (!target) return;
 
     Object.entries(videoRefs.current).forEach(([id, video]) => {
       if (!video || id === projectId) return;
       video.pause();
     });
+    pauseAllEmbeddedExcept(projectId);
+    setEmbeddedPlayback((prev) => {
+      const next = { ...prev };
+      Object.keys(next).forEach((key) => {
+        if (key !== projectId) next[key] = false;
+      });
+      return next;
+    });
 
-    if (Number.isFinite(target.duration) && target.duration > 0) {
-      target.currentTime = Math.max(0, Math.min(1, percentage)) * target.duration;
+    if (target.paused) {
+      target.muted = false;
+      void target.play().catch(() => {
+        // Ignore blocked play attempts; user can click again.
+      });
+      return;
     }
 
-    void target.play().catch(() => {
-      // Ignore blocked play attempts; user can click again.
+    target.pause();
+  }, [pauseAllEmbeddedExcept]);
+
+  const handleEmbeddedToggle = useCallback((projectId: string, kind: "youtube" | "vimeo") => {
+    setEmbeddedPlayback((prev) => {
+      const nextIsPlaying = !prev[projectId];
+      if (nextIsPlaying) {
+        Object.entries(videoRefs.current).forEach(([id, video]) => {
+          if (!video || id === projectId) return;
+          video.pause();
+        });
+        pauseAllEmbeddedExcept(projectId);
+      }
+
+      const frame = iframeRefs.current[projectId];
+      if (frame?.contentWindow) {
+        if (kind === "youtube") {
+          frame.contentWindow.postMessage(
+            JSON.stringify({
+              event: "command",
+              func: nextIsPlaying ? "playVideo" : "pauseVideo",
+              args: [],
+            }),
+            "*"
+          );
+          frame.contentWindow.postMessage(
+            JSON.stringify({ event: "command", func: "unMute", args: [] }),
+            "*"
+          );
+        } else {
+          frame.contentWindow.postMessage({ method: nextIsPlaying ? "play" : "pause" }, "*");
+          frame.contentWindow.postMessage({ method: "setVolume", value: 1 }, "*");
+        }
+      }
+
+      const next: Record<string, boolean> = {};
+      Object.keys(prev).forEach((key) => {
+        next[key] = key === projectId ? nextIsPlaying : false;
+      });
+      next[projectId] = nextIsPlaying;
+      return next;
     });
-  }, []);
+  }, [pauseAllEmbeddedExcept]);
+
+  const handleCardToggle = useCallback(
+    (projectId: string, mediaSource: MediaSource) => {
+      if (mediaSource.kind === "video") {
+        handleDirectVideoToggle(projectId);
+        return;
+      }
+      handleEmbeddedToggle(projectId, mediaSource.kind);
+    },
+    [handleDirectVideoToggle, handleEmbeddedToggle]
+  );
 
   const handleSelectedWorkWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     if (!e.shiftKey) return;
@@ -98,11 +217,30 @@ const TheStage = () => {
     e.currentTarget.scrollLeft += e.deltaY;
   }, []);
 
+  const scrollGallery = useCallback((direction: "left" | "right") => {
+    if (!galleryScrollRef.current) return;
+    const delta = direction === "left" ? -420 : 420;
+    galleryScrollRef.current.scrollBy({ left: delta, behavior: "smooth" });
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    const container = galleryScrollRef.current;
+    if (!container) {
+      setCanScrollLeft(false);
+      setCanScrollRight(true);
+      return;
+    }
+
+    const { scrollLeft, scrollWidth, clientWidth } = container;
+    setCanScrollLeft(scrollLeft > 0);
+    setCanScrollRight(scrollLeft < scrollWidth - clientWidth - 1);
+  }, []);
+
   const tabs = [
-    { key: "all", label: "All Works", enabled: activeModules.allWorks },
-    { key: "studio", label: "The Studio", enabled: activeModules.studio },
-    { key: "picture-edit", label: "Picture & Edit", enabled: activeModules.pictureEdit },
-    { key: "cinematic-view", label: "Cinematic View", enabled: activeModules.cinematic },
+    { key: "all", label: activeModules.allWorks.label, enabled: activeModules.allWorks.isEnabled },
+    { key: "studio", label: activeModules.studio.label, enabled: activeModules.studio.isEnabled },
+    { key: "picture-edit", label: activeModules.pictureEdit.label, enabled: activeModules.pictureEdit.isEnabled },
+    { key: "cinematic-view", label: activeModules.cinematic.label, enabled: activeModules.cinematic.isEnabled },
   ] as const;
   const visibleTabs = tabs.filter((tab) => tab.enabled);
 
@@ -120,6 +258,27 @@ const TheStage = () => {
   const visibleCustomLinks = customLinks
     .map((link) => ({ label: link.label.trim(), href: ensureHttpsUrl(link.url) }))
     .filter((link) => link.label && link.href);
+  const filteredMedia = (projects ?? [])
+    .filter((item) => {
+      const manualSelection = mediaRouting?.[item.id]?.showInAllWorks;
+      if (typeof manualSelection === "boolean") return manualSelection === true;
+      const legacyValue = (item as ProjectRow & { showInAllWorks?: boolean }).showInAllWorks;
+      if (typeof legacyValue === "boolean") return legacyValue === true;
+      return true;
+    })
+    .sort((a, b) => {
+      const orderA = mediaRouting?.[a.id]?.sortOrder;
+      const orderB = mediaRouting?.[b.id]?.sortOrder;
+      const hasOrderA = typeof orderA === "number";
+      const hasOrderB = typeof orderB === "number";
+
+      if (hasOrderA && hasOrderB) return orderA - orderB;
+      if (hasOrderA) return -1;
+      if (hasOrderB) return 1;
+      return 0;
+    });
+  const playableMedia = filteredMedia.filter((item) => !!getMediaSource(item.video_url));
+  console.log("Current All Works media:", filteredMedia);
 
   useEffect(() => {
     const currentTabVisible = visibleTabs.some((tab) => tab.key === activeTab);
@@ -146,6 +305,16 @@ const TheStage = () => {
       }
     };
   }, [fadeToBlack, navigate]);
+
+  useEffect(() => {
+    handleScroll();
+
+    const onResize = () => handleScroll();
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+    };
+  }, [handleScroll, loading, playableMedia.length]);
 
   const handleStudioTimeUpdate = useCallback(
     (event: React.SyntheticEvent<HTMLVideoElement>) => {
@@ -274,44 +443,104 @@ const TheStage = () => {
 
         {loading ? (
           <p className="text-muted-foreground text-center py-12">Loading…</p>
-        ) : projects.length === 0 ? (
-          <p className="text-muted-foreground text-center py-12">No projects yet.</p>
+        ) : playableMedia.length === 0 ? (
+          <p className="text-muted-foreground text-center py-12">No works added yet.</p>
         ) : (
-          <div
-            className="flex gap-6 overflow-x-auto pb-8 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
-            onWheel={handleSelectedWorkWheel}
-          >
-            {projects.map((project, i) => {
-              const videoUrl = getVideoUrl(project.video_url);
+          <div>
+            <p className="mb-2 text-xs text-gray-500">Scroll or use Shift + Wheel</p>
+            <div className="relative group">
+              {canScrollLeft && (
+                <button
+                  type="button"
+                  onClick={() => scrollGallery("left")}
+                  className="absolute left-2 top-1/2 -translate-y-1/2 z-10 h-10 w-10 rounded-full bg-black/50 backdrop-blur text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-black/65"
+                  aria-label="Scroll selected work left"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
+              )}
+              {canScrollRight && (
+                <button
+                  type="button"
+                  onClick={() => scrollGallery("right")}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 z-10 h-10 w-10 rounded-full bg-black/50 backdrop-blur text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-black/65"
+                  aria-label="Scroll selected work right"
+                >
+                  <ChevronRight className="w-5 h-5" />
+                </button>
+              )}
+            <div
+              ref={galleryScrollRef}
+              className="flex gap-6 overflow-x-auto pb-8 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+              onWheel={handleSelectedWorkWheel}
+              onScroll={handleScroll}
+            >
+              {playableMedia.map((project, i) => {
+                const mediaSource = getMediaSource(project.video_url);
+                if (!mediaSource) return null;
+                const isPlaying = !!embeddedPlayback[project.id];
+                const coverImage = mediaRouting?.[project.id]?.coverImage || (mediaSource.kind === "youtube" ? mediaSource.previewUrl : null);
 
-              return (
-                <ScrollReveal key={project.id} delay={i * 120}>
-                  <div className="group w-[40vw] min-w-[320px] max-w-[560px] flex-shrink-0">
-                    <div className="relative overflow-hidden rounded-lg border border-border/50 bg-card">
-                      <video
-                        ref={(el) => {
-                          videoRefs.current[project.id] = el;
-                        }}
-                        src={videoUrl}
-                        preload="metadata"
-                        muted
-                        playsInline
-                        className="w-full aspect-video object-cover cursor-pointer transition duration-200 group-hover:brightness-110"
-                        onClick={(e) => handleSeekAndPlay(project.id, e)}
-                      />
+                return (
+                  <ScrollReveal key={project.id} delay={i * 120}>
+                    <div className="group w-[40vw] min-w-[320px] max-w-[560px] flex-shrink-0">
+                      <div className="relative overflow-hidden rounded-lg border border-border/50 bg-card">
+                        {mediaSource.kind === "video" ? (
+                          <video
+                            ref={(el) => {
+                              videoRefs.current[project.id] = el;
+                            }}
+                            src={mediaSource.src}
+                            preload="metadata"
+                            muted
+                            playsInline
+                            className="w-full aspect-video object-cover transition duration-200 group-hover:brightness-110"
+                            onPlay={() => setEmbeddedPlayback((prev) => ({ ...prev, [project.id]: true }))}
+                            onPause={() => setEmbeddedPlayback((prev) => ({ ...prev, [project.id]: false }))}
+                          />
+                        ) : (
+                          <div className="relative w-full aspect-video">
+                            <iframe
+                              ref={(el) => {
+                                iframeRefs.current[project.id] = el;
+                              }}
+                              src={mediaSource.embedUrl}
+                              title={project.title}
+                              allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+                              allowFullScreen
+                              className="w-full h-full"
+                            />
+                          </div>
+                        )}
+                        {!isPlaying && coverImage && (
+                          <img
+                            src={coverImage}
+                            alt={`${project.title} cover`}
+                            className="absolute inset-0 z-10 w-full h-full object-cover pointer-events-none"
+                          />
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleCardToggle(project.id, mediaSource)}
+                          className="absolute inset-0 z-20 flex items-center justify-center bg-black/20 hover:bg-black/10 transition-colors"
+                          aria-label={`Toggle ${project.title} playback`}
+                        >
+                          <span className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-black/60 text-white border border-white/20">
+                            {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 ml-0.5" />}
+                          </span>
+                        </button>
+                      </div>
+                      <div className="p-5">
+                        <h3 className="text-lg font-semibold text-foreground">{project.title}</h3>
+                        {project.client && <p className="text-xs text-muted-foreground">{project.client}</p>}
+                        {project.description && <p className="text-sm text-muted-foreground mt-1">{project.description}</p>}
+                      </div>
                     </div>
-                    <div className="p-5">
-                      <span className="text-xs font-mono-console tracking-wider uppercase text-muted-foreground">
-                        {project.category === "post" ? "Post Production" : "Recordings & Mixes"}
-                      </span>
-                      <h3 className="text-lg font-semibold mt-1 text-foreground">{project.title}</h3>
-                      {project.client && <p className="text-xs text-muted-foreground">{project.client}</p>}
-                      {project.description && <p className="text-sm text-muted-foreground mt-1">{project.description}</p>}
-                    </div>
-                  </div>
-                </ScrollReveal>
-              );
-            })}
+                  </ScrollReveal>
+                );
+              })}
+            </div>
+            </div>
           </div>
         )}
       </section>

@@ -34,11 +34,25 @@ export interface FooterContent {
   copyrightName: string;
 }
 
-interface ActiveModules {
-  allWorks: boolean;
-  studio: boolean;
-  pictureEdit: boolean;
-  cinematic: boolean;
+export interface MediaRoutingConfig {
+  showInStudio: boolean;
+  showInAllWorks: boolean;
+  coverImage: string | null;
+  sortOrder: number | null;
+}
+
+export type MediaRoutingMap = Record<string, MediaRoutingConfig>;
+
+export interface ModuleConfig {
+  isEnabled: boolean;
+  label: string;
+}
+
+export interface ActiveModules {
+  allWorks: ModuleConfig;
+  studio: ModuleConfig;
+  pictureEdit: ModuleConfig;
+  cinematic: ModuleConfig;
 }
 
 interface SiteContextValue {
@@ -55,6 +69,10 @@ interface SiteContextValue {
   setServicesContent: React.Dispatch<React.SetStateAction<ServiceContent[]>>;
   footerContent: FooterContent;
   setFooterContent: React.Dispatch<React.SetStateAction<FooterContent>>;
+  mediaRouting: MediaRoutingMap;
+  setMediaRouting: React.Dispatch<React.SetStateAction<MediaRoutingMap>>;
+  updateMediaRouting: (projectId: string, patch: Partial<MediaRoutingConfig>) => void;
+  getMediaRoutingConfig: (projectId: string) => MediaRoutingConfig;
   saveSettings: () => void;
 }
 
@@ -85,10 +103,10 @@ const DEFAULT_CONTACT: ContactInfo = {
 };
 
 const DEFAULT_ACTIVE_MODULES: ActiveModules = {
-  allWorks: true,
-  studio: true,
-  pictureEdit: true,
-  cinematic: true,
+  allWorks: { isEnabled: true, label: "All Works" },
+  studio: { isEnabled: true, label: "The Studio" },
+  pictureEdit: { isEnabled: true, label: "Picture & Edit" },
+  cinematic: { isEnabled: true, label: "Cinematic View" },
 };
 
 const DEFAULT_HERO_CONTENT: HeroContent = {
@@ -108,6 +126,13 @@ const DEFAULT_FOOTER_CONTENT: FooterContent = {
   copyrightName: "YANIV PAZ",
 };
 
+const DEFAULT_MEDIA_ROUTING_CONFIG: MediaRoutingConfig = {
+  showInStudio: false,
+  showInAllWorks: true,
+  coverImage: null,
+  sortOrder: null,
+};
+
 interface PersistedSiteSettings {
   contact: ContactInfo;
   customLinks: CustomLink[];
@@ -115,6 +140,7 @@ interface PersistedSiteSettings {
   heroContent: HeroContent;
   servicesContent: ServiceContent[];
   footerContent: FooterContent;
+  mediaRouting: MediaRoutingMap;
 }
 
 export const ensureHttpsUrl = (value: string) => {
@@ -132,6 +158,33 @@ const normalizeContactForStorage = (contact: ContactInfo): ContactInfo => {
   return normalized;
 };
 
+const normalizeActiveModules = (value: unknown): ActiveModules => {
+  const source = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const keys: Array<keyof ActiveModules> = ["allWorks", "studio", "pictureEdit", "cinematic"];
+
+  return keys.reduce((acc, key) => {
+    const defaultConfig = DEFAULT_ACTIVE_MODULES[key];
+    const entry = source[key];
+
+    if (typeof entry === "boolean") {
+      acc[key] = { ...defaultConfig, isEnabled: entry };
+      return acc;
+    }
+
+    if (entry && typeof entry === "object") {
+      const moduleEntry = entry as Partial<ModuleConfig>;
+      acc[key] = {
+        isEnabled: typeof moduleEntry.isEnabled === "boolean" ? moduleEntry.isEnabled : defaultConfig.isEnabled,
+        label: typeof moduleEntry.label === "string" && moduleEntry.label.trim() ? moduleEntry.label : defaultConfig.label,
+      };
+      return acc;
+    }
+
+    acc[key] = defaultConfig;
+    return acc;
+  }, {} as ActiveModules);
+};
+
 const loadPersistedSettings = (): PersistedSiteSettings | null => {
   if (typeof window === "undefined") return null;
   try {
@@ -141,7 +194,7 @@ const loadPersistedSettings = (): PersistedSiteSettings | null => {
     return {
       contact: normalizeContactForStorage({ ...DEFAULT_CONTACT, ...(parsed.contact || {}) }),
       customLinks: Array.isArray(parsed.customLinks) ? parsed.customLinks : [],
-      activeModules: { ...DEFAULT_ACTIVE_MODULES, ...(parsed.activeModules || {}) },
+      activeModules: normalizeActiveModules(parsed.activeModules),
       heroContent: { ...DEFAULT_HERO_CONTENT, ...(parsed.heroContent || {}) },
       servicesContent: DEFAULT_SERVICES_CONTENT.map((defaultService, index) => {
         const service = Array.isArray(parsed.servicesContent) ? parsed.servicesContent[index] : undefined;
@@ -151,6 +204,8 @@ const loadPersistedSettings = (): PersistedSiteSettings | null => {
         };
       }),
       footerContent: { ...DEFAULT_FOOTER_CONTENT, ...(parsed.footerContent || {}) },
+      mediaRouting:
+        parsed.mediaRouting && typeof parsed.mediaRouting === "object" ? (parsed.mediaRouting as MediaRoutingMap) : {},
     };
   } catch {
     return null;
@@ -165,6 +220,7 @@ export const SiteProvider = ({ children }: { children: ReactNode }) => {
   const [heroContent, setHeroContent] = useState<HeroContent>(persisted?.heroContent || DEFAULT_HERO_CONTENT);
   const [servicesContent, setServicesContent] = useState<ServiceContent[]>(persisted?.servicesContent || DEFAULT_SERVICES_CONTENT);
   const [footerContent, setFooterContent] = useState<FooterContent>(persisted?.footerContent || DEFAULT_FOOTER_CONTENT);
+  const [mediaRouting, setMediaRouting] = useState<MediaRoutingMap>(persisted?.mediaRouting || {});
 
   const updateContactField = useCallback(<K extends keyof ContactInfo>(key: K, value: ContactInfo[K]) => {
     setContact((prev) => {
@@ -177,6 +233,26 @@ export const SiteProvider = ({ children }: { children: ReactNode }) => {
     });
   }, []);
 
+  const getMediaRoutingConfig = useCallback(
+    (projectId: string): MediaRoutingConfig => ({
+      ...DEFAULT_MEDIA_ROUTING_CONFIG,
+      ...(mediaRouting[projectId] || {}),
+    }),
+    [mediaRouting]
+  );
+
+  const updateMediaRouting = useCallback((projectId: string, patch: Partial<MediaRoutingConfig>) => {
+    if (!projectId) return;
+    setMediaRouting((prev) => ({
+      ...prev,
+      [projectId]: {
+        ...DEFAULT_MEDIA_ROUTING_CONFIG,
+        ...(prev[projectId] || {}),
+        ...patch,
+      },
+    }));
+  }, []);
+
   const saveSettings = useCallback(() => {
     if (typeof window === "undefined") return;
     const payload: PersistedSiteSettings = {
@@ -186,9 +262,10 @@ export const SiteProvider = ({ children }: { children: ReactNode }) => {
       heroContent,
       servicesContent,
       footerContent,
+      mediaRouting,
     };
     window.localStorage.setItem(SITE_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
-  }, [contact, customLinks, activeModules, heroContent, servicesContent, footerContent]);
+  }, [contact, customLinks, activeModules, heroContent, servicesContent, footerContent, mediaRouting]);
 
   useEffect(() => {
     saveSettings();
@@ -209,6 +286,10 @@ export const SiteProvider = ({ children }: { children: ReactNode }) => {
       setServicesContent,
       footerContent,
       setFooterContent,
+      mediaRouting,
+      setMediaRouting,
+      updateMediaRouting,
+      getMediaRoutingConfig,
       saveSettings,
     }),
     [
@@ -218,8 +299,11 @@ export const SiteProvider = ({ children }: { children: ReactNode }) => {
       heroContent,
       servicesContent,
       footerContent,
+      mediaRouting,
+      getMediaRoutingConfig,
       saveSettings,
       updateContactField,
+      updateMediaRouting,
     ]
   );
 

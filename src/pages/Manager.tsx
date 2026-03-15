@@ -299,44 +299,123 @@ const Manager = () => {
           </section>
 
           <section className="rounded-xl border border-slate-800 bg-slate-950/60 p-6">
-            <h2 className="mb-4 text-lg font-medium text-cyan-300">Services / Modules</h2>
+            <h2 className="mb-4 text-lg font-medium text-cyan-300">Services</h2>
             <div className="grid gap-3 md:grid-cols-2">
-              <label className="inline-flex items-center gap-3 rounded-md border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm">
+              <div className="rounded-md border border-slate-800 bg-slate-900/70 px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={activeModules.allWorks.isEnabled}
+                    onChange={(e) =>
+                      setActiveModules((prev) => ({
+                        ...prev,
+                        allWorks: { ...prev.allWorks, isEnabled: e.target.checked },
+                      }))
+                    }
+                    className="accent-cyan-400"
+                  />
+                  <span className="text-sm text-slate-300">All Works</span>
+                </div>
                 <input
-                  type="checkbox"
-                  checked={activeModules.allWorks}
-                  onChange={(e) => setActiveModules((prev) => ({ ...prev, allWorks: e.target.checked }))}
-                  className="accent-cyan-400"
+                  type="text"
+                  value={activeModules.allWorks.label}
+                  onChange={(e) =>
+                    setActiveModules((prev) => ({
+                      ...prev,
+                      allWorks: { ...prev.allWorks, label: e.target.value },
+                    }))
+                  }
+                  placeholder="Display label"
+                  className="mt-3 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none transition-colors focus:border-cyan-400"
                 />
-                All Works
-              </label>
-              <label className="inline-flex items-center gap-3 rounded-md border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm">
+              </div>
+
+              <div className="rounded-md border border-slate-800 bg-slate-900/70 px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={activeModules.studio.isEnabled}
+                    onChange={(e) =>
+                      setActiveModules((prev) => ({
+                        ...prev,
+                        studio: { ...prev.studio, isEnabled: e.target.checked },
+                      }))
+                    }
+                    className="accent-cyan-400"
+                  />
+                  <span className="text-sm text-slate-300">The Studio</span>
+                </div>
                 <input
-                  type="checkbox"
-                  checked={activeModules.studio}
-                  onChange={(e) => setActiveModules((prev) => ({ ...prev, studio: e.target.checked }))}
-                  className="accent-cyan-400"
+                  type="text"
+                  value={activeModules.studio.label}
+                  onChange={(e) =>
+                    setActiveModules((prev) => ({
+                      ...prev,
+                      studio: { ...prev.studio, label: e.target.value },
+                    }))
+                  }
+                  placeholder="Display label"
+                  className="mt-3 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none transition-colors focus:border-cyan-400"
                 />
-                The Studio
-              </label>
-              <label className="inline-flex items-center gap-3 rounded-md border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm">
+              </div>
+
+              <div className="rounded-md border border-slate-800 bg-slate-900/70 px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={activeModules.pictureEdit.isEnabled}
+                    onChange={(e) =>
+                      setActiveModules((prev) => ({
+                        ...prev,
+                        pictureEdit: { ...prev.pictureEdit, isEnabled: e.target.checked },
+                      }))
+                    }
+                    className="accent-cyan-400"
+                  />
+                  <span className="text-sm text-slate-300">Picture &amp; Edit</span>
+                </div>
                 <input
-                  type="checkbox"
-                  checked={activeModules.pictureEdit}
-                  onChange={(e) => setActiveModules((prev) => ({ ...prev, pictureEdit: e.target.checked }))}
-                  className="accent-cyan-400"
+                  type="text"
+                  value={activeModules.pictureEdit.label}
+                  onChange={(e) =>
+                    setActiveModules((prev) => ({
+                      ...prev,
+                      pictureEdit: { ...prev.pictureEdit, label: e.target.value },
+                    }))
+                  }
+                  placeholder="Display label"
+                  className="mt-3 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none transition-colors focus:border-cyan-400"
                 />
-                Picture &amp; Edit
-              </label>
-              <label className="inline-flex items-center gap-3 rounded-md border border-slate-800 bg-slate-900/70 px-4 py-3 text-sm">
+              </div>
+
+              <div className="rounded-md border border-slate-800 bg-slate-900/70 px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={activeModules.cinematic.isEnabled}
+                    onChange={(e) =>
+                      setActiveModules((prev) => ({
+                        ...prev,
+                        cinematic: { ...prev.cinematic, isEnabled: e.target.checked },
+                      }))
+                    }
+                    className="accent-cyan-400"
+                  />
+                  <span className="text-sm text-slate-300">Cinematic View</span>
+                </div>
                 <input
-                  type="checkbox"
-                  checked={activeModules.cinematic}
-                  onChange={(e) => setActiveModules((prev) => ({ ...prev, cinematic: e.target.checked }))}
-                  className="accent-cyan-400"
+                  type="text"
+                  value={activeModules.cinematic.label}
+                  onChange={(e) =>
+                    setActiveModules((prev) => ({
+                      ...prev,
+                      cinematic: { ...prev.cinematic, label: e.target.value },
+                    }))
+                  }
+                  placeholder="Display label"
+                  className="mt-3 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none transition-colors focus:border-cyan-400"
                 />
-                Cinematic View
-              </label>
+              </div>
             </div>
           </section>
 

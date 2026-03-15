@@ -7,8 +7,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
-import { ArrowLeft, Trash2, Pencil, Plus, Upload, X } from "lucide-react";
+import { ArrowLeft, Trash2, Pencil, Plus, Upload, X, ChevronUp, ChevronDown } from "lucide-react";
 import type { PostgrestError, Session } from "@supabase/supabase-js";
+import { useSiteContext } from "@/context/SiteContext";
 
 interface StemPayload {
   name?: string;
@@ -62,6 +63,7 @@ const createStemRow = (name = ""): StemRowInput => ({
 
 const MediaLibrary = () => {
   const navigate = useNavigate();
+  const { getMediaRoutingConfig, setMediaRouting, updateMediaRouting } = useSiteContext();
   const [session, setSession] = useState<Session | null>(null);
 
   const [projects, setProjects] = useState<ProjectRow[]>([]);
@@ -69,6 +71,8 @@ const MediaLibrary = () => {
   const [form, setForm] = useState(EMPTY_FORM);
   const [audioMixFile, setAudioMixFile] = useState<File | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [coverImageFile, setCoverImageFile] = useState<File | null>(null);
+  const [existingCoverImage, setExistingCoverImage] = useState<string | null>(null);
   const [stems, setStems] = useState<StemRowInput[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -130,6 +134,8 @@ const MediaLibrary = () => {
     setForm(EMPTY_FORM);
     setAudioMixFile(null);
     setVideoFile(null);
+    setCoverImageFile(null);
+    setExistingCoverImage(null);
     setStems([]);
     setEditingId(null);
     setShowForm(false);
@@ -147,6 +153,8 @@ const MediaLibrary = () => {
     });
     setAudioMixFile(null);
     setVideoFile(null);
+    setCoverImageFile(null);
+    setExistingCoverImage(getMediaRoutingConfig(p.id).coverImage);
     setStems(
       normalizedProjectStems(p).map((s) => ({
         id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -167,6 +175,11 @@ const MediaLibrary = () => {
       return;
     }
     toast.success("Deleted");
+    setMediaRouting((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     fetchProjects();
   };
 
@@ -189,6 +202,12 @@ const MediaLibrary = () => {
       if (videoFile) {
         uploadedVideoUrl = await uploadFile(videoFile, "video", VIDEO_BUCKET);
         if (!uploadedVideoUrl) throw new Error("Failed to upload video");
+      }
+
+      let uploadedCoverImageUrl: string | null = null;
+      if (coverImageFile) {
+        uploadedCoverImageUrl = await uploadFile(coverImageFile, "cover_images", VIDEO_BUCKET);
+        if (!uploadedCoverImageUrl) throw new Error("Failed to upload cover image");
       }
 
       const stemPayload: StemPayload[] = [];
@@ -223,7 +242,6 @@ const MediaLibrary = () => {
         category: form.category,
         video_url: uploadedVideoUrl || form.video_url.trim() || null,
         description: form.description.trim() || null,
-        stems: stemPayload,
         ...legacy,
       };
 
@@ -237,11 +255,20 @@ const MediaLibrary = () => {
 
         const { error } = await supabase.from("projects").update(record as any).eq("id", editingId);
         if (error) throw error;
+        updateMediaRouting(editingId, {
+          coverImage: uploadedCoverImageUrl ?? existingCoverImage ?? null,
+        });
         toast.success("Project updated successfully");
       } else {
         record.audio_mix_url = mixUrl;
-        const { error } = await supabase.from("projects").insert(record as any);
+        const { data, error } = await supabase.from("projects").insert(record as any).select("id").single();
         if (error) throw error;
+        if (data?.id) {
+          updateMediaRouting(data.id, {
+            showInAllWorks: true,
+            coverImage: uploadedCoverImageUrl ?? null,
+          });
+        }
         toast.success("Project created successfully");
       }
 
@@ -260,6 +287,66 @@ const MediaLibrary = () => {
   const stemCountLabel = useMemo(() => {
     return (p: ProjectRow) => normalizedProjectStems(p).length;
   }, [normalizedProjectStems]);
+
+  const sortProjectsByRoutingOrder = useCallback(
+    (list: ProjectRow[]) => {
+      return [...list].sort((a, b) => {
+        const orderA = getMediaRoutingConfig(a.id).sortOrder;
+        const orderB = getMediaRoutingConfig(b.id).sortOrder;
+        const hasOrderA = typeof orderA === "number";
+        const hasOrderB = typeof orderB === "number";
+
+        if (hasOrderA && hasOrderB) return orderA - orderB;
+        if (hasOrderA) return -1;
+        if (hasOrderB) return 1;
+        return 0;
+      });
+    },
+    [getMediaRoutingConfig]
+  );
+
+  const orderedProjects = useMemo(() => sortProjectsByRoutingOrder(projects), [projects, sortProjectsByRoutingOrder]);
+
+  const persistProjectOrder = useCallback(
+    (ordered: ProjectRow[]) => {
+      setProjects(ordered);
+      setMediaRouting((prev) => {
+        const next = { ...prev };
+        ordered.forEach((project, idx) => {
+          next[project.id] = {
+            showInStudio: false,
+            showInAllWorks: true,
+            coverImage: null,
+            sortOrder: null,
+            ...(next[project.id] || {}),
+            sortOrder: idx,
+          };
+        });
+        return next;
+      });
+    },
+    [setMediaRouting]
+  );
+
+  const moveUp = useCallback(
+    (index: number) => {
+      if (index <= 0) return;
+      const reordered = [...orderedProjects];
+      [reordered[index - 1], reordered[index]] = [reordered[index], reordered[index - 1]];
+      persistProjectOrder(reordered);
+    },
+    [orderedProjects, persistProjectOrder]
+  );
+
+  const moveDown = useCallback(
+    (index: number) => {
+      if (index >= orderedProjects.length - 1) return;
+      const reordered = [...orderedProjects];
+      [reordered[index], reordered[index + 1]] = [reordered[index + 1], reordered[index]];
+      persistProjectOrder(reordered);
+    },
+    [orderedProjects, persistProjectOrder]
+  );
 
   if (!session) {
     return (
@@ -332,6 +419,7 @@ const MediaLibrary = () => {
                     placeholder="https://www.youtube.com/watch?v=... or https://.../video.mp4"
                     className="bg-secondary/50"
                   />
+                  <p className="text-[11px] text-muted-foreground">Link-only projects are supported (YouTube, Vimeo, or direct video URL).</p>
                 </div>
                 <div className="space-y-1">
                   <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Upload Video File</label>
@@ -347,6 +435,33 @@ const MediaLibrary = () => {
                       </button>
                     )}
                   </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Upload Cover Image</label>
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-2 px-3 py-2 rounded-md border border-input bg-secondary/50 cursor-pointer hover:bg-secondary transition-colors text-sm">
+                      <Upload className="w-4 h-4 text-muted-foreground" />
+                      <span className="text-foreground/80">
+                        {coverImageFile?.name || (existingCoverImage ? "Using existing cover" : "Choose image")}
+                      </span>
+                      <input type="file" accept="image/*" className="hidden" onChange={(e) => setCoverImageFile(e.target.files?.[0] || null)} />
+                    </label>
+                    {(coverImageFile || existingCoverImage) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCoverImageFile(null);
+                          setExistingCoverImage(null);
+                        }}
+                        className="text-muted-foreground hover:text-destructive"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                  {existingCoverImage && !coverImageFile && (
+                    <img src={existingCoverImage} alt="Current cover" className="mt-2 h-14 w-24 object-cover rounded border border-border/60" />
+                  )}
                 </div>
               </div>
             </div>
@@ -467,11 +582,12 @@ const MediaLibrary = () => {
                   <TableHead>Category</TableHead>
                   <TableHead>Video</TableHead>
                   <TableHead>Stems</TableHead>
+                  <TableHead>Routing</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {projects.map((p) => (
+                {orderedProjects.map((p, index) => (
                   <TableRow key={p.id}>
                     <TableCell className="font-medium">{p.title}</TableCell>
                     <TableCell>{p.client || "—"}</TableCell>
@@ -480,8 +596,48 @@ const MediaLibrary = () => {
                     </TableCell>
                     <TableCell>{p.video_url ? "✓" : "—"}</TableCell>
                     <TableCell>{stemCountLabel(p)}</TableCell>
+                    <TableCell>
+                      <div className="flex flex-col gap-1">
+                        <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={getMediaRoutingConfig(p.id).showInStudio}
+                            onChange={(e) => updateMediaRouting(p.id, { showInStudio: e.target.checked })}
+                            className="accent-cyan-400"
+                          />
+                          Studio
+                        </label>
+                        <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={getMediaRoutingConfig(p.id).showInAllWorks}
+                            onChange={(e) => updateMediaRouting(p.id, { showInAllWorks: e.target.checked })}
+                            className="accent-cyan-400"
+                          />
+                          All Works
+                        </label>
+                      </div>
+                    </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => moveUp(index)}
+                          disabled={index === 0}
+                          aria-label={`Move ${p.title} up`}
+                        >
+                          <ChevronUp className="w-4 h-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => moveDown(index)}
+                          disabled={index === orderedProjects.length - 1}
+                          aria-label={`Move ${p.title} down`}
+                        >
+                          <ChevronDown className="w-4 h-4" />
+                        </Button>
                         <Button variant="ghost" size="sm" onClick={() => startEdit(p)}>
                           <Pencil className="w-4 h-4" />
                         </Button>

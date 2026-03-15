@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useEffect } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { useSiteContext } from "@/context/SiteContext";
 
 export type Category = "recordings" | "post";
 
@@ -15,6 +16,7 @@ export interface Project {
 }
 
 export function useProjects() {
+  const { getMediaRoutingConfig } = useSiteContext();
   const [allProjects, setAllProjects] = useState<Project[]>([]);
   const [category, setCategory] = useState<Category>("post");
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -25,8 +27,7 @@ export function useProjects() {
     const load = async () => {
       const { data, error } = await supabase
         .from("projects")
-        .select("*")
-        .order("created_at", { ascending: false });
+        .select("*");
 
       if (error) {
         console.error("Failed to fetch projects:", error);
@@ -73,8 +74,21 @@ export function useProjects() {
   }, []);
 
   const filtered = useMemo(
-    () => allProjects.filter((p) => p.category === category),
-    [allProjects, category]
+    () =>
+      allProjects
+        .filter((p) => getMediaRoutingConfig(p.id).showInStudio && p.category === category)
+        .sort((a, b) => {
+          const orderA = getMediaRoutingConfig(a.id).sortOrder;
+          const orderB = getMediaRoutingConfig(b.id).sortOrder;
+          const hasOrderA = typeof orderA === "number";
+          const hasOrderB = typeof orderB === "number";
+
+          if (hasOrderA && hasOrderB) return orderA - orderB;
+          if (hasOrderA) return -1;
+          if (hasOrderB) return 1;
+          return 0;
+        }),
+    [allProjects, category, getMediaRoutingConfig]
   );
 
   const currentProject = filtered[currentIndex] ?? filtered[0] ?? null;
